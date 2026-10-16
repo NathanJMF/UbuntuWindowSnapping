@@ -290,9 +290,3 @@ GSETTINGS_SCHEMA_DIR="$PWD/schemas" gsettings set org.gnome.shell.extensions.key
 ```
 
 Validation: 478 checks (121 rules, 77 adapter, 79 delayed placement, 201 lifecycle), including morphs with a lagging client, a minimum-size client, a window closed mid-morph, an interrupted morph, and a morph from maximized. Each morph behaviour was mutation-checked.
-
-## Morph to the granted size (version 18, experiment/animations branch)
-
-A weird frame near the end of some morphs came from minimum-size apps. Claude will not go narrower than 600 px, but the portrait monitor's half is 540 px. Version 17 waited for a 540 px frame that never came, so it fell back to the 60% handover, morphed the snapshot to 540 px, held the 600 px window squeezed to 540 px for 150 ms, then relaxed it out to 600 px. Mutter applies an app's size limits to the request immediately, so the frame it reports right after the request is the size the app will draw. The morph now targets that granted frame (when it sits on the requested edges) for the snapshot, the handover and the hold. The 60% handover remains for apps that are simply slow.
-
-Validation: 487 checks (121 rules, 77 adapter, 79 delayed placement, 210 lifecycle), including a minimum-size app and a 300 ms app.
