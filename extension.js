@@ -65,6 +65,8 @@ export default class KeyboardMonitorSnap extends Extension {
         // Window -> smoothed milliseconds from a size request until it is
         // drawn, and between successive redraws (diagnostics only).
         this._latency = new WeakMap();
+        // Window -> smoothed absolute deviation of latency samples.
+        this._latencySpread = new WeakMap();
         this._redraw = new WeakMap();
         // Window -> monotonic time until which the image maps exactly.
         this._exactUntil = new WeakMap();
@@ -328,7 +330,7 @@ export default class KeyboardMonitorSnap extends Extension {
                         acked = newest(3);
                     if (acked !== -1) {
                         if (measurable)
-                            this._sample(this._latency, window, (now-sent[acked].at)/1000);
+                            this._sampleLatency(window, (now-sent[acked].at)/1000);
                         sent.splice(0, acked+1);
                     }
                 }
@@ -354,6 +356,8 @@ export default class KeyboardMonitorSnap extends Extension {
                     console.log(`${this.uuid}: FRAME ${JSON.stringify({id:window.get_id(), elapsed,
                         curve, drawn:frame, mutter:rect(window.get_frame_rect()), requested:lastRequest?.rect ?? null,
                         lead:Math.round(this._lead(window)*10)/10, pending:sent.length,
+                        latency:Math.round((this._latency.get(window) ?? 0)*10)/10,
+                        spread:Math.round((this._latencySpread.get(window) ?? 0)*10)/10,
                         redraw:Math.round((this._redraw.get(window) ?? 0)*10)/10,
                         scale:[actor.scale_x, actor.scale_y].map(v => Math.round(v*1000)/1000)})}`);
             }, 'completed', () => finish(), this);
@@ -383,12 +387,22 @@ export default class KeyboardMonitorSnap extends Extension {
         const previous = map.get(window);
         map.set(window, previous === undefined ? ms : previous + LATENCY_WEIGHT*(ms-previous));
     }
-    // Aim requests one measured lag ahead: content lands on the curve when
-    // drawn and then trails it slightly, always on the same side. Aiming
-    // further (lag + half a redraw, version 12) centred the error but put
-    // content alternately ahead and behind, which read as rubber-banding.
+    _sampleLatency(window, ms) {
+        const mean = this._latency.get(window);
+        if (mean !== undefined)
+            this._sample(this._latencySpread, window, Math.abs(ms-mean));
+        this._sample(this._latency, window, ms);
+    }
+    // Aim requests at the fast end of the client's measured lag (mean minus
+    // twice its typical deviation), so drawn content almost never arrives
+    // ahead of the curve and the image stretches continuously, one way.
+    // Content ahead is shown unstretched (one-sided rule), which stalls the
+    // visible edge: aiming at the mean (version 14) did that on ~10% of
+    // frames; aiming further (version 12) also flipped the stretch.
     _lead(window) {
-        return Math.min(MAX_LEAD_MS, this._latency.get(window) ?? DEFAULT_LATENCY_MS);
+        const mean = this._latency.get(window) ?? DEFAULT_LATENCY_MS;
+        const spread = this._latencySpread.get(window) ?? 0;
+        return Math.min(MAX_LEAD_MS, Math.max(0, mean - 2*spread));
     }
     // Draw the window actor so its current real frame appears at `rect`,
     // within the stretch cap. Remembers what was actually drawn.

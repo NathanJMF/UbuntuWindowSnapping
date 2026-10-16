@@ -107,7 +107,9 @@ function makeWindow({frame = {x:100, y:100, width:600, height:400}, lag = 40, ma
         move_resize_frame(u, x, y, width, height) {
             this.frame = {x, y, width, height};
             this.requests.push({...this.frame});
-            this.queue.push({at:mock.clock, r:{...this.frame}});
+            const lag = typeof this.lag === 'function' ? this.lag() : this.lag;
+            const due = Math.max(mock.clock + lag*1000, this.queue.at(-1)?.due ?? 0);
+            this.queue.push({due, r:{...this.frame}});
         },
     });
     w.lag = lag;
@@ -136,7 +138,7 @@ const flush = async () => {
 let win = null;
 const step = async (ms = 4) => {
     mock.clock += ms*1000;
-    while (win && win.queue.length && mock.clock-win.queue[0].at >= win.lag*1000)
+    while (win && win.queue.length && mock.clock >= win.queue[0].due)
         win.drawn = win.queue.shift().r;
     for (const t of [...mock.timelines]) t.tick(ms);
     mock.timelines = mock.timelines.filter(t => !t.stopped);
@@ -202,6 +204,35 @@ const fresh = opts => {
     assert(samples.every(ms => ms >= 39 && ms <= 45), `every latency sample near 40 ms (got ${samples.map(Math.round)})`);
     assert(Math.abs(e._lead(w)-40) <= 5, 'look-ahead converges on the real lag');
     clean(w, 'latency');
+}
+
+// 2b. A client whose lag jitters (20-60 ms): the look-ahead aims at the
+// fast end, so drawn content rarely gets ahead of the curve.
+{
+    let seed = 7;
+    const rand = () => (seed = (seed*1103515245 + 12345) % 2147483648) / 2147483648;
+    const w = fresh({frame:{x:0, y:0, width:500, height:800}, lag:() => 20 + 40*rand()});
+    e._states.set(w, {layout:{x:'left', y:null}, monitor:0, rect:{x:0, y:0, width:500, height:800}, frame:{x:0, y:0, width:500, height:800}});
+    let ahead = 0, frames = 0;
+    const real = e._showAt.bind(e);
+    e._showAt = (w_, actor, r, shape) => {
+        real(w_, actor, r, shape);
+        // Growing or shrinking width: content ahead means past the curve.
+        if (shape.growth?.x) {
+            frames++;
+            if (shape.growth.x*(w_.drawn.width - r.width) > 1) ahead++;
+        }
+    };
+    for (const dir of ['right', 'right', 'left', 'left', 'right', 'right', 'left', 'left']) {
+        const p = press(dir);
+        await settle(600);
+        await p;
+    }
+    e._showAt = real;
+    assert(e._latencySpread.get(w) > 3, 'lag variation measured');
+    assert(e._lead(w) < e._latency.get(w), 'look-ahead aims below the mean lag');
+    assert(frames > 50 && ahead/frames < 0.05, `content ahead of the curve on under 5% of frames (${ahead}/${frames})`);
+    clean(w, 'jittery lag');
 }
 
 // 3. Same-size moves (crossing between equal monitors) give no samples.

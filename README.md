@@ -237,3 +237,11 @@ An independent code review of version 13 found these, now fixed:
 The dependency watcher still polls every 500 ms: it also detects a fast Tiling Assistant restart by handler identity, which a state-change signal alone would not.
 
 Validation: 349 checks (121 rules, 77 adapter, 79 delayed placement, 72 lifecycle).
+
+## Conservative look-ahead (version 15, experiment/animations branch)
+
+Version 14 felt rubbery and stuttery again. Against version 13 at the same 3% cap, its logs showed 38–70% more stretch pulses per snap, while frame stalls were rarer (3% of snaps against 11%). The cause was the corrected latency estimate. Version 13 had under-read the lag (look-ahead 2–3 ms), so content almost always trailed the curve. With an accurate mean (5–11 ms) and frame-to-frame jitter, content arrived ahead of the curve on 21% of frames, up from 13%. The one-sided stretch then showed it unstretched, so the visible edge stalled while the curve moved on (10% of moving frames, up from 6%).
+
+The spread of each window's latency samples is now tracked too. Requests aim at the fast end of the measured lag (mean minus twice the typical deviation), so drawn content rarely gets ahead and the image stretches continuously one way. `FRAME` logs include `latency` and `spread`.
+
+Validation: 357 checks (121 rules, 77 adapter, 79 delayed placement, 80 lifecycle). A client with 20–60 ms jittered lag has content ahead of the curve on under 5% of frames; with the version 14 look-ahead the same client was ahead on 22%.
