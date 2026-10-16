@@ -132,7 +132,7 @@ Version 6 validation: 195 checks (121 rules, 32 adapter, 42 delayed placement).
 
 ## Custom keyboard animations (version 7)
 
-Keyboard snaps no longer use GNOME's size-change effect, which stretched a snapshot and redrew the app only at the end. The real window frame is now resized on every compositor frame (250 ms, ease-out cubic), so applications reflow continuously while they move and resize, including across monitors. A new size is requested only after the client acknowledges the previous one (or 50 ms passes), so slow clients are not flooded; the exact target is always confirmed afterwards as before.
+Keyboard snaps no longer use GNOME's size-change effect, which stretched a snapshot and redrew the app only at the end. The real window frame is now resized on every compositor frame (170 ms by default, ease-out cubic), so applications reflow continuously while they move and resize, including across monitors. A new size is requested only after the client acknowledges the previous one (or 50 ms passes), so slow clients are not flooded; the exact target is always confirmed afterwards as before.
 
 - Leaving a maximized window: a snapshot covers the frame jump while Mutter unmaximizes, then fades out (120 ms) as the live animation starts.
 - Ending full: the frame grows to the work area first, then native maximize is issued with GNOME's zoom effect skipped.
@@ -141,7 +141,7 @@ Keyboard snaps no longer use GNOME's size-change effect, which stretched a snaps
 - Length: `animation-duration` setting (0 disables). GNOME's global animation switch and slow-down factor are respected. Mouse snapping and Tiling Assistant animations are unchanged.
 
 ```bash
-GSETTINGS_SCHEMA_DIR="$PWD/schemas" gsettings set org.gnome.shell.extensions.keyboard-monitor-snap animation-duration 250
+GSETTINGS_SCHEMA_DIR="$PWD/schemas" gsettings set org.gnome.shell.extensions.keyboard-monitor-snap animation-duration 170
 ```
 
 Version 7 validation: 223 checks (121 rules, 42 adapter, 60 delayed placement). Live smoothness depends on each application's resize speed and must be checked after logging in.
