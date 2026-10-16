@@ -101,7 +101,9 @@ async function placeStages(window, target, monitor, full, {waitFor, both, constr
         stable = previous && sameFrame(previous, frame, 0) ? stable+1 : 0;
         previous = frameCopy(frame);
         const sizeChanged = Math.abs(frame.width-before.width) > 3 || Math.abs(frame.height-before.height) > 3;
-        return onMonitor && positioned && constrained && sizeChanged && stable >= 5;
+        // Checks run about every 16 ms; eight stable samples keep the
+        // original ~125 ms guard for minimum-size clients.
+        return onMonitor && positioned && constrained && sizeChanged && stable >= 8;
     }, 'monitor-and-frame');
     constrain?.(window, target, monitor);
     if (full) {

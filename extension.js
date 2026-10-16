@@ -15,6 +15,9 @@ import {placeWindow, sameFrame, interpolateRect} from './placement.js';
 
 const UUID = 'tiling-assistant@ubuntu.com';
 const COVER_FADE_MS = 120;
+// Confirmation checks run about once per frame, starting immediately, so a
+// state that is already true settles in one frame instead of two 25 ms polls.
+const SETTLE_POLL_MS = 16;
 // Presses made while a window animates run afterwards, in order.
 const MAX_QUEUED = 3;
 const DIRECTIONS = ['left', 'right', 'up', 'down'];
@@ -140,7 +143,7 @@ export default class KeyboardMonitorSnap extends Extension {
                 error ? reject(error) : resolve();
             };
             operation.cancelWait = () => finish(new Error('Placement cancelled'));
-            source = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 25, () => {
+            const check = () => {
                 try {
                     if (operation.cancelled || !this._enabled || !this._dependencyReady() ||
                         this._dependency.stateObj._keybindingHandler !== operation.owner ||
@@ -158,7 +161,10 @@ export default class KeyboardMonitorSnap extends Extension {
                     }
                 } catch (error) { finish(error); }
                 return finished ? GLib.SOURCE_REMOVE : GLib.SOURCE_CONTINUE;
-            });
+            };
+            check();
+            if (!finished)
+                source = GLib.timeout_add(GLib.PRIORITY_DEFAULT, SETTLE_POLL_MS, check);
         });
     }
     async _place(window, target, monitor, operation) {
