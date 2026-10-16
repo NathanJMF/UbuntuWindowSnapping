@@ -269,3 +269,24 @@ A second independent review (of version 15) confirmed the version 14–15 fixes 
 `tests/lifecycle.test.js` now uses two-check waits with a 2 s timeout, synchronous size-change (with a late variant), monitor removal, missing schemas and keys, and Mutter's restore of the floating frame. Each fix was mutation-checked: removing it makes a test fail. The one exception, leaving the skip handler connected through the animation, makes no behavioural difference because Mutter uses the skip inside the call.
 
 Validation: 431 checks (121 rules, 77 adapter, 79 delayed placement, 154 lifecycle).
+
+## Morph animation style (version 17, experiment/animations branch)
+
+Live resizing is limited by how often each app redraws: Chromium about 200 times a second, Claude about 110, on monitors up to 500 Hz. Each layout stays on screen for several display frames however well the edges are tracked. The `morph` style takes the approach used by macOS window tiling, iPadOS Stage Manager and Android window animations instead:
+
+1. The placement starts with a snapshot of the window as it looks now. From maximized, the unmaximize cover is that snapshot.
+2. The app gets a single request for its final size.
+3. On every display frame the snapshot moves and scales along the curve. This is pure GPU work, so it runs at the full refresh rate whatever the app's speed.
+4. Once the app has drawn its final size, or at 60% of the motion for apps that cannot reach it, the live window is mapped onto the curve and fades in over 70 ms while the snapshot fades out.
+5. The live window then holds on target as before, and native maximize still applies for full.
+
+App speed only decides when the fade begins, not how smoothly the window moves. The trade-off: mid-motion the content is visibly scaled, and the old and new layouts are briefly blended.
+
+`animation-style` is `live` (default; versions 7–16 behaviour) or `morph`, read at the start of every snap, so it can be switched without logging out:
+
+```bash
+GSETTINGS_SCHEMA_DIR="$PWD/schemas" gsettings set org.gnome.shell.extensions.keyboard-monitor-snap animation-style morph
+GSETTINGS_SCHEMA_DIR="$PWD/schemas" gsettings set org.gnome.shell.extensions.keyboard-monitor-snap animation-style live
+```
+
+Validation: 478 checks (121 rules, 77 adapter, 79 delayed placement, 201 lifecycle), including morphs with a lagging client, a minimum-size client, a window closed mid-morph, an interrupted morph, and a morph from maximized. Each morph behaviour was mutation-checked.

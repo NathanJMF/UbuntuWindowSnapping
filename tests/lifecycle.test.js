@@ -9,7 +9,7 @@ import {anchorFor} from '../placement.js';
 const root = Gio.File.new_for_uri(import.meta.url).get_parent().get_parent().get_path();
 const text = new TextDecoder().decode(GLib.file_get_contents(`${root}/extension.js`)[1]);
 const setup = `
-export const mock = {later:[], missingKeys:new Set(), missingSchemas:new Set(), lateUnmaximize:0, halfEase:false, lateSizeChange:false, monitors:2, invalidMonitorCalls:[], clock:0, ints:{'animation-duration':120,'max-stretch':3}, timelines:[], focus:null,
+export const mock = {widgets:[], later:[], missingKeys:new Set(), missingSchemas:new Set(), lateUnmaximize:0, halfEase:false, lateSizeChange:false, monitors:2, invalidMonitorCalls:[], clock:0, ints:{'animation-duration':120,'max-stretch':3}, timelines:[], focus:null,
  neighbor:-1, bindings:new Map(), values:new Map(), defaults:new Map(), resets:[], handler:{}, grab:null,
  timers:new Map(), pending:[], nativeEffects:0, skippedEffects:0};
 export function signals(o) {
@@ -50,7 +50,14 @@ const Meta = {WindowClientType:{WAYLAND:0, X11:1}, DisplayDirection:{LEFT:0, RIG
  KeyBindingFlags:{IGNORE_AUTOREPEAT:1}, MaximizeFlags:{BOTH:3}};
 const Shell = {ActionMode:{NORMAL:1}};
 const St = {Settings:{get:() => ({enable_animations:true, slow_down_factor:1})},
- Widget:class {set_position() {} set_size() {} ease({onStopped}) {onStopped?.();} destroy() {}}};
+ // Snapshot widgets record where they were drawn and whether they are gone.
+ Widget:class {
+  constructor() {this.opacity = 255; this.destroyed = false; this.moves = []; mock.widgets.push(this);}
+  set_position(x, y) {this.x = x; this.y = y;}
+  set_size(width, height) {this.width = width; this.height = height; this.moves.push({x:this.x, y:this.y, width, height});}
+  ease(p) {if ('opacity' in p) this.opacity = p.opacity; p.onStopped?.();}
+  destroy() {this.destroyed = true; this.opacityAtDestroy = this.opacity;}
+ }};
 class Timeline {
  constructor({duration}) {signals(this); this.duration = duration; this.elapsed = 0; mock.timelines.push(this);}
  get_elapsed_time() {return this.elapsed;}
@@ -138,6 +145,7 @@ function makeWindow({frame = {x:100, y:100, width:600, height:400}, lag = 40, ma
         maximize() {this.maximizedHorizontally = this.maximizedVertically = true;
             this.frame = this.get_work_area_for_monitor(this.get_monitor()); this.drawn = {...this.frame}; sizeChange();},
         move_resize_frame(u, x, y, width, height) {
+            width = Math.max(this.minWidth ?? 0, width);
             this.frame = {x, y, width, height};
             this.requests.push({...this.frame});
             const lag = typeof this.lag === 'function' ? this.lag() : this.lag;
@@ -632,6 +640,124 @@ for (const signal of [true, false]) {
     e._showAt = real;
     assert(caps.length > 3 && caps.every(c => c === 0.03), 'an interrupting motion uses the 3% cap from its first frame');
     clean(w, 'exact mapping scope');
+}
+// ---- Morph style ----
+const morphStyle = on => mock.values.set('custom:animation-style', on ? 'morph' : 'live');
+const halfState = w => e._states.set(w, {layout:{x:'left', y:null}, monitor:0,
+    rect:{x:0, y:0, width:500, height:800}, frame:{x:0, y:0, width:500, height:800}});
+
+// 21. Left half -> Right -> full with a 40 ms client: the snapshot follows
+// the curve every frame, the app gets one request, and the live window only
+// appears once it has drawn the final size.
+{
+    morphStyle(true);
+    const w = fresh({frame:{x:0, y:0, width:500, height:800}});
+    halfState(w);
+    mock.widgets = [];
+    const start = mock.clock;
+    const samples = [];
+    const p = press('right');
+    for (let i = 0; i < 60; i++) {
+        await step(4);
+        samples.push({at:(mock.clock-start)/1000, opacity:w.actor.opacity, drawnFull:w.drawn.width === 1000});
+    }
+    await settle(600);
+    await p;
+    const snap = mock.widgets[0];
+    assert(mock.widgets.length === 1, 'one snapshot per placement');
+    const widths = snap.moves.map(m => m.width);
+    assert(widths.length > 20 && widths.every((v, i) => i === 0 || v >= widths[i-1]), 'snapshot grows along the curve every frame');
+    assert(widths.at(-1) === 1000, 'snapshot reaches the target size');
+    assert(w.requests.length === 1 && w.requests[0].width === 1000, 'the app receives a single request for its final size');
+    assert(samples.filter(s => !s.drawnFull).every(s => s.opacity === 0), 'live window hidden until the app has drawn the final size');
+    assert(samples.some(s => s.drawnFull && s.opacity === 255), 'live window shown once drawn');
+    assert(snap.destroyed && snap.opacityAtDestroy === 0, 'snapshot faded out, not cut');
+    assert(w.maximizedHorizontally && w.maximizedVertically, 'morph to full still maximizes natively');
+    clean(w, 'morph');
+}
+
+// 22. A minimum-size app never reaches the target: the fade starts at 60%
+// of the motion anyway and everything is cleaned up.
+{
+    const w = fresh({frame:{...AREAS[0]}});
+    w.minWidth = 700;
+    e._states.set(w, {layout:{x:null, y:null}, monitor:0, rect:{...AREAS[0]}, frame:{...AREAS[0]}});
+    mock.widgets = [];
+    const start = mock.clock;
+    let shownAt = null;
+    const p = press('left');
+    for (let i = 0; i < 80; i++) {
+        await step(4);
+        if (shownAt === null && w.actor.opacity === 255 && e._visuals.has(w)) shownAt = (mock.clock-start)/1000;
+    }
+    await settle(800);
+    await p;
+    // Full -> left half lasts 90 ms at the 120 ms base; 60% of that is 54 ms.
+    assert(shownAt !== null && shownAt <= 62, `live window fades in at 60% of the motion without reaching the target (at ${shownAt} ms)`);
+    assert(w.drawn.width === 700 && mock.widgets.every(x => x.destroyed), 'minimum width kept, snapshot gone');
+    clean(w, 'morph minimum size');
+}
+
+// 23. Closing mid-morph removes the snapshot and stops driving the window.
+{
+    const w = fresh({frame:{x:0, y:0, width:500, height:800}});
+    halfState(w);
+    mock.widgets = [];
+    const p = press('right');
+    for (let i = 0; i < 4; i++) await step(4);
+    w.unmanaged = true;
+    w.emit('unmanaging');
+    await settle(300);
+    let failed = null;
+    await p.catch(error => {failed = error;});
+    assert(!failed && mock.widgets.every(x => x.destroyed), 'closed mid-morph: no error, snapshot removed');
+    clean(w, 'morph closed');
+}
+
+// 24. Interrupting a morph continues from the drawn rectangle and leaves no
+// snapshot behind.
+{
+    const w = fresh({frame:{x:0, y:0, width:500, height:800}});
+    halfState(w);
+    mock.widgets = [];
+    const p1 = press('right');
+    for (let i = 0; i < 5; i++) await step(4);
+    const seen = {...e._visuals.get(w).rect};
+    const p2 = press('right');
+    await settle(800);
+    await Promise.all([p1, p2]);
+    assert(w.frame.x === 500 && w.frame.width === 500, 'left half, Right, Right ends on the right half');
+    const second = mock.widgets[1];
+    assert(second && second.moves[0].x === seen.x && second.moves[0].width === seen.width,
+        'second snapshot starts where the first motion was interrupted');
+    assert(mock.widgets.every(x => x.destroyed), 'all snapshots removed');
+    clean(w, 'morph interrupted');
+}
+
+// 25. From maximized, the unmaximize cover is the morph's snapshot.
+{
+    const w = fresh({frame:{...AREAS[0]}, maximized:true});
+    w.floating = {x:100, y:100, width:600, height:400};
+    mock.widgets = [];
+    const p = press('left');
+    await settle(800);
+    await p;
+    assert(mock.widgets.length === 1, 'one snapshot covers both the unmaximize and the morph');
+    assert(mock.widgets[0].moves[0].width === 1000 && mock.widgets[0].moves.at(-1).width === 500, 'snapshot morphs from full to the left half');
+    clean(w, 'morph from maximized');
+}
+
+// 26. Live style is unchanged: no snapshot for a window that is not maximized.
+{
+    morphStyle(false);
+    const w = fresh({frame:{x:0, y:0, width:500, height:800}});
+    halfState(w);
+    mock.widgets = [];
+    const p = press('right');
+    await settle(600);
+    await p;
+    assert(mock.widgets.length === 0 && w.requests.length > 3, 'live style: no snapshot, continuous requests');
+    clean(w, 'live style');
 }
 print(`PASS: ${count} lifecycle assertions`);
 } finally {GLib.unlink(path); GLib.rmdir(folder);}

@@ -98,7 +98,9 @@ async function placeStages(window, target, monitor, full, {waitFor, both, constr
     // Where the window visibly is now; the animation starts here even if
     // unmaximizing restores an older floating frame underneath the cover.
     const start = frameCopy(window.get_frame_rect());
-    if (window.fullscreen || window.maximizedHorizontally || window.maximizedVertically)
+    // Morph animations snapshot every window; otherwise only a window leaving
+    // the maximized state needs a cover for its frame jump.
+    if (effects?.coversAll || window.fullscreen || window.maximizedHorizontally || window.maximizedVertically)
         effects?.cover(start);
     // Each native state change gets its own effect skip, armed only around
     // the call and its wait, so close/minimize effects are not swallowed.

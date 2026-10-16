@@ -17,6 +17,11 @@ import {placeWindow, sameFrame, interpolateRect, travelDuration, visualTransform
 const UUID = 'tiling-assistant@ubuntu.com';
 const rect = r => ({x: r.x, y: r.y, width: r.width, height: r.height});
 const COVER_FADE_MS = 120;
+// Morph style: the live window fades in over this long once the app has
+// drawn its final size, or from this fraction of the motion at the latest
+// (minimum-size apps never reach the requested size).
+const MORPH_FADE_MS = 70;
+const MORPH_READY_LIMIT = 0.6;
 // Confirmation checks run about once per frame, starting immediately, so a
 // state that is already true settles in one frame instead of two 25 ms polls.
 const SETTLE_POLL_MS = 16;
@@ -236,14 +241,20 @@ export default class KeyboardMonitorSnap extends Extension {
         Twm.clearTilingProps(window.get_id());
         window.isTiled = false;
         window.tiledRect = null;
+        const morph = this._settings.get_string('animation-style') === 'morph';
+        const effects = this._effects(window, {morph});
         const applied = await placeWindow(window, target, monitor, {
             both: Meta.MaximizeFlags.BOTH,
             previousPlacement: operation.previousPlacement,
             // An interrupted animation continues from what is on screen.
-            animate: (from, to, apply) => this._animate(window,
-                this._visuals.get(window)?.rect ?? this._displayedRect(window) ?? from, to, apply, operation),
+            animate: (from, to, apply) => {
+                const start = this._visuals.get(window)?.rect ?? this._displayedRect(window) ?? from;
+                return morph && effects.snapshot()
+                    ? this._morph(window, start, to, apply, operation, effects)
+                    : this._animate(window, start, to, apply, operation);
+            },
             monitorExists: index => this._monitorExists(index),
-            effects: this._effects(window),
+            effects,
             waitFor: (predicate, stage) => this._waitForWindow(window, predicate, operation, stage),
             clearConstraints: w => {
                 if (w.override_constraints) {
@@ -406,6 +417,84 @@ export default class KeyboardMonitorSnap extends Extension {
             timeline.start();
         });
     }
+    // Snapshot morph: the snapshot taken when the placement began moves along
+    // the curve on every display frame, while the app renders its final size
+    // once. When that size is drawn, the live window, mapped onto the curve,
+    // fades in as the snapshot fades out. App speed only decides when the
+    // fade starts, never how smoothly the window moves.
+    _morph(window, from, to, apply, operation, effects) {
+        const base = this._animationDuration();
+        const actor = window.get_compositor_private();
+        const cover = effects.snapshot();
+        if (!base || !actor || !cover)
+            return this._animate(window, from, to, apply, operation);
+        const duration = travelDuration(base, from, to);
+        const anchor = anchorFor(from, to);
+        const exact = {anchor, maxStretch: null, growth: {x: 0, y: 0}};
+        this._trace(window, 'animate', {from, to, duration, style: 'morph',
+            client: window.get_client_type?.() === Meta.WindowClientType.X11 ? 'x11' : 'wayland'});
+        this._visuals.get(window)?.stopHold?.();
+        actor.remove_all_transitions();
+        this._exactUntil.delete(window);
+        // One request for the final size; nothing in between.
+        apply(to);
+        return new Promise((resolve, reject) => {
+            const timeline = new Clutter.Timeline({actor, duration});
+            // Elapsed time when the live window began to fade in.
+            let fadeFrom = null;
+            let finished = false;
+            const finish = error => {
+                if (finished) return;
+                finished = true;
+                operation.cancelAnimation = null;
+                timeline.disconnectObject(this);
+                actor.disconnectObject(timeline);
+                window.disconnectObject?.(timeline);
+                const elapsed = timeline.get_elapsed_time();
+                timeline.stop();
+                if (!error) {
+                    // The live window takes over; an unfinished fade completes
+                    // on its own while the hold keeps the window on target.
+                    actor.opacity = 255;
+                    this._showAt(window, actor, to, exact);
+                    effects.dropCover(fadeFrom === null ? MORPH_FADE_MS
+                        : Math.max(0, MORPH_FADE_MS-(elapsed-fadeFrom)));
+                    this._hold(window, actor, to, exact);
+                } else if (!operation.superseded) {
+                    this._clearVisual(window, false, actor);
+                }
+                error ? reject(error) : resolve();
+            };
+            operation.cancelAnimation = () => finish(new Error('Placement cancelled'));
+            timeline.connectObject('new-frame', () => {
+                const elapsed = timeline.get_elapsed_time();
+                const curve = interpolateRect(from, to, easeOutCubic(elapsed/duration));
+                cover.set_position(curve.x, curve.y);
+                cover.set_size(curve.width, curve.height);
+                const drawn = this._drawnFrame(window, actor).frame;
+                const ready = Math.abs(drawn.width-to.width) <= 3 && Math.abs(drawn.height-to.height) <= 3;
+                if (fadeFrom === null && (ready || elapsed >= MORPH_READY_LIMIT*duration))
+                    fadeFrom = elapsed;
+                if (fadeFrom !== null) {
+                    actor.opacity = 255;
+                    this._showAt(window, actor, curve, exact);
+                    cover.opacity = Math.round(255*(1-Math.min(1, (elapsed-fadeFrom)/MORPH_FADE_MS)));
+                } else {
+                    // Still covered: remember what is on screen for interruptions.
+                    const visual = this._visuals.get(window) ?? {};
+                    visual.rect = curve;
+                    this._visuals.set(window, visual);
+                }
+                if (this._settings.get_boolean('debug-logging'))
+                    console.log(`${this.uuid}: FRAME ${JSON.stringify({id:window.get_id(), style:'morph', elapsed,
+                        curve, drawn, ready, fadeFrom, cover:cover.opacity,
+                        scale:[actor.scale_x, actor.scale_y].map(v => Math.round(v*1000)/1000)})}`);
+            }, 'completed', () => finish(), this);
+            actor.connectObject('destroy', () => operation.cancel(), timeline);
+            window.connectObject?.('unmanaging', () => operation.cancel(), timeline);
+            timeline.start();
+        });
+    }
     // The window frame as currently drawn: the actor's own geometry (synced
     // only when the client's new buffer is shown) minus Mutter's current
     // shadow/border margins. Falls back to Mutter's rects before first paint.
@@ -531,7 +620,7 @@ export default class KeyboardMonitorSnap extends Extension {
     // Native maximize/unmaximize transitions are replaced: GNOME's zoom
     // effect is skipped, and a snapshot covers the frame jump while Mutter
     // leaves the maximized state, then fades out as the animation begins.
-    _effects(window) {
+    _effects(window, {morph = false} = {}) {
         const actor = window.get_compositor_private();
         let cover = null;
         let hidden = false;
@@ -582,8 +671,10 @@ export default class KeyboardMonitorSnap extends Extension {
                     return;
                 }
                 cover = new St.Widget({content});
-                cover.set_position(rect.x, rect.y);
-                cover.set_size(rect.width, rect.height);
+                // An interrupted motion's snapshot starts where it was seen.
+                const at = this._visuals.get(window)?.rect ?? this._displayedRect(window) ?? rect;
+                cover.set_position(at.x, at.y);
+                cover.set_size(at.width, at.height);
                 global.window_group.add_child(cover);
                 global.window_group.set_child_above_sibling(cover, actor);
                 actor.opacity = 0;
@@ -594,8 +685,25 @@ export default class KeyboardMonitorSnap extends Extension {
                 visual.rect ??= {...rect};
                 this._visuals.set(window, visual);
             },
-            uncover: () => {
+            // In morph mode the snapshot is the animation's starting image;
+            // the morph fades it out itself.
+            coversAll: morph,
+            snapshot: () => cover,
+            dropCover: ms => {
                 if (!cover) return;
+                const fading = cover;
+                cover = null;
+                actor.opacity = 255;
+                hidden = false;
+                if (ms <= 0) {
+                    fading.destroy();
+                    return;
+                }
+                fading.ease({opacity: 0, duration: ms, mode: Clutter.AnimationMode.EASE_OUT_QUAD,
+                    onStopped: () => fading.destroy()});
+            },
+            uncover: () => {
+                if (!cover || morph) return;
                 const fading = cover;
                 cover = null;
                 actor.opacity = 255;
