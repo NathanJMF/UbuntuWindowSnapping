@@ -1,4 +1,4 @@
-import {placeWindow,sameFrame,interpolateRect,travelDuration} from '../placement.js';
+import {placeWindow,sameFrame,interpolateRect,travelDuration,visualTransform} from '../placement.js';
 let assertions=0;
 function assert(value,message){assertions++;if(!value)throw new Error(message);}
 function environment({monitor=2,minWidth=0,cancelAt=Infinity,resizeDelay=4,geometryAssignsMonitor=false}={}) {
@@ -112,6 +112,18 @@ for (const [source,dest,target] of [
  assert(travelDuration(120,half,{x:0,y:0,width:2560,height:1355})===136,'half -> full (1280 px) ~1.13x');
  assert(travelDuration(120,half,{x:3640,y:0,width:1280,height:1355})===162,'monitor crossing clamps to 1.35x');
  assert(travelDuration(0,half,{x:3640,y:0,width:1280,height:1355})===0,'disabled stays disabled');
+}
+{
+ // Frame (with 20 px shadow margin in its buffer) shown at a lagging visual rect.
+ const frame={x:100,y:100,width:400,height:300},buffer={x:80,y:80,width:440,height:340};
+ const visual={x:300,y:150,width:800,height:600};
+ const t=visualTransform(frame,buffer,visual);
+ const screen=(lx,ly)=>({x:buffer.x+t.translation_x+lx*t.scale_x,y:buffer.y+t.translation_y+ly*t.scale_y});
+ const tl=screen(20,20),br=screen(420,320);
+ assert(tl.x===300&&tl.y===150,'frame top-left maps to visual top-left');
+ assert(br.x===1100&&br.y===750,'frame bottom-right maps to visual bottom-right');
+ const id=visualTransform(frame,buffer,frame);
+ assert(id.scale_x===1&&id.scale_y===1&&id.translation_x===0&&id.translation_y===0,'caught-up client needs no transform');
 }
 function effectsLog(log){return {cover:()=>log.push('cover'),skip:()=>log.push('skip'),uncover:()=>log.push('uncover'),release:()=>log.push('release')};}
 // Animation waits for each intermediate frame like a live client would.

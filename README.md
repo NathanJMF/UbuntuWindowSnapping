@@ -153,3 +153,14 @@ Version 7 validation: 223 checks (121 rules, 42 adapter, 60 delayed placement). 
 - A press during an animation interrupts it. All presses made meanwhile (up to three) are applied through the rules from the interrupted placement's intended layout, then the window animates straight from where it is to the final target. Right, Right, Right quickly is one trip.
 
 Validation: 233 checks (121 rules, 48 adapter, 64 delayed placement).
+
+## Smoothing slow applications (version 9, experiment/animations branch)
+
+On Wayland a window's position only changes when the application acknowledges a new size, so slow clients (Chromium, Electron apps) stepped through the animation. Each frame now also transforms the window actor (scale and translation, pivot at the actor origin, as GNOME's own effects do) so that the window's current real frame is drawn exactly at the animation curve's rectangle. A client that keeps up needs no visible transform; a lagging one is stretched slightly between acknowledgements instead of stalling.
+
+- After the motion, a lagging window is held visually on target until its frame catches up, or for at most 150 ms (minimum-size apps never reach the target), then the transform relaxes over 80 ms.
+- An interrupted motion keeps its transform, and the next motion starts from the rectangle on screen rather than the lagging real frame, so rapid presses never jump backwards.
+- Mouse grabs, extension disable, window close, and failed placements reset the transform immediately.
+- Debug logging records a `visual-hold` trace with whether the client caught up and how long it took.
+
+Validation: 245 checks (121 rules, 57 adapter, 67 delayed placement), including a client that trails one request behind.

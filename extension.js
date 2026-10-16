@@ -11,13 +11,17 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {TilingWindowManager as Twm} from 'file:///usr/share/gnome-shell/extensions/tiling-assistant@ubuntu.com/src/extension/tilingWindowManager.js';
 import {Rect} from 'file:///usr/share/gnome-shell/extensions/tiling-assistant@ubuntu.com/src/extension/utility.js';
 import {FULL, step, rectangle} from './engine.js';
-import {placeWindow, sameFrame, interpolateRect, travelDuration} from './placement.js';
+import {placeWindow, sameFrame, interpolateRect, travelDuration, visualTransform} from './placement.js';
 
 const UUID = 'tiling-assistant@ubuntu.com';
 const COVER_FADE_MS = 120;
 // Confirmation checks run about once per frame, starting immediately, so a
 // state that is already true settles in one frame instead of two 25 ms polls.
 const SETTLE_POLL_MS = 16;
+// After the motion, a lagging client is held visually on target this long
+// while it finishes resizing, then its transform relaxes over RELAX_MS.
+const VISUAL_HOLD_MS = 150;
+const RELAX_MS = 80;
 // Presses made while a window animates interrupt it; up to this many are
 // combined into the next placement.
 const MAX_QUEUED = 3;
@@ -44,6 +48,9 @@ export default class KeyboardMonitorSnap extends Extension {
         this._states = new WeakMap();
         this._busy = new WeakSet();
         this._queued = new WeakMap();
+        // Window -> {rect, hold}: the on-screen rectangle currently shown by
+        // an actor transform, and the post-animation hold timeline.
+        this._visuals = new Map();
         this._traceTimers = new Set();
         this._operations = new Map();
         this._enabled = true;
@@ -60,6 +67,7 @@ export default class KeyboardMonitorSnap extends Extension {
         this._grabId = global.display.connect('grab-op-begin', (_display, window) => {
             this._queued.delete(window);
             this._operations.get(window)?.cancel();
+            this._clearVisual(window, false);
             this._states.delete(window);
         });
     }
@@ -178,7 +186,9 @@ export default class KeyboardMonitorSnap extends Extension {
         const applied = await placeWindow(window, target, monitor, {
             both: Meta.MaximizeFlags.BOTH,
             previousPlacement: operation.previousPlacement,
-            animate: (from, to, apply) => this._animate(window, from, to, apply, operation),
+            // An interrupted animation continues from what is on screen.
+            animate: (from, to, apply) => this._animate(window,
+                this._visuals.get(window)?.rect ?? from, to, apply, operation),
             effects: this._effects(window),
             waitFor: (predicate, stage) => this._waitForWindow(window, predicate, operation, stage),
             clearConstraints: w => {
@@ -222,10 +232,15 @@ export default class KeyboardMonitorSnap extends Extension {
     _animate(window, from, to, apply, operation) {
         const base = this._animationDuration();
         const actor = window.get_compositor_private();
-        if (!base || !actor)
+        if (!base || !actor) {
+            this._clearVisual(window, false);
             return Promise.resolve();
+        }
         const duration = travelDuration(base, from, to);
         this._trace(window, 'animate', {from, to, duration});
+        // A previous hold or relax transition is superseded by this motion.
+        this._visuals.get(window)?.hold?.stop();
+        actor.remove_all_transitions();
         return new Promise((resolve, reject) => {
             const timeline = new Clutter.Timeline({actor, duration,
                 progress_mode: Clutter.AnimationMode.EASE_OUT_CUBIC});
@@ -239,26 +254,87 @@ export default class KeyboardMonitorSnap extends Extension {
                 timeline.disconnectObject(this);
                 actor.disconnectObject(timeline);
                 timeline.stop();
+                if (!error)
+                    this._hold(window, actor, to);
+                else if (!operation.superseded)
+                    this._clearVisual(window, false);
+                // A superseded motion keeps its transform: the next placement
+                // starts from this on-screen rectangle without a jump.
                 error ? reject(error) : resolve();
             };
             operation.cancelAnimation = () => finish(new Error('Placement cancelled'));
             timeline.connectObject('new-frame', () => {
+                const rect = interpolateRect(from, to, timeline.get_progress());
+                // Real geometry is throttled to the client's pace; the image
+                // follows the curve every frame regardless.
                 const frame = window.get_frame_rect();
                 const now = GLib.get_monotonic_time();
                 const acknowledged = !requested ||
                     (Math.abs(frame.width-requested.width) <= 3 && Math.abs(frame.height-requested.height) <= 3);
-                if (!acknowledged && now-sentAt < 50000)
-                    return;
-                const rect = interpolateRect(from, to, timeline.get_progress());
-                if (requested && sameFrame(rect, requested, 0))
-                    return;
-                requested = rect;
-                sentAt = now;
-                apply(rect);
+                if ((acknowledged || now-sentAt >= 50000) && !(requested && sameFrame(rect, requested, 0))) {
+                    requested = rect;
+                    sentAt = now;
+                    apply(rect);
+                }
+                this._showAt(window, actor, rect);
             }, 'completed', () => finish(), this);
             actor.connectObject('destroy', () => finish(new Error('Placement cancelled')), timeline);
             timeline.start();
         });
+    }
+    // Draw the window actor so its current real frame appears at `rect`.
+    _showAt(window, actor, rect) {
+        const t = visualTransform(window.get_frame_rect(), window.get_buffer_rect(), rect);
+        actor.set_pivot_point(0, 0);
+        actor.scale_x = t.scale_x;
+        actor.scale_y = t.scale_y;
+        actor.translation_x = t.translation_x;
+        actor.translation_y = t.translation_y;
+        const visual = this._visuals.get(window) ?? {};
+        visual.rect = rect;
+        this._visuals.set(window, visual);
+    }
+    // Keep a lagging client visually on target until its frame catches up,
+    // or VISUAL_HOLD_MS passes (minimum-size apps never reach it), then relax.
+    _hold(window, actor, target) {
+        const visual = this._visuals.get(window);
+        if (!visual)
+            return;
+        const hold = new Clutter.Timeline({actor, duration: VISUAL_HOLD_MS});
+        visual.hold = hold;
+        const started = GLib.get_monotonic_time();
+        const end = caughtUp => {
+            hold.disconnectObject(this);
+            actor.disconnectObject(hold);
+            hold.stop();
+            this._trace(window, 'visual-hold', {caughtUp, ms:Math.round((GLib.get_monotonic_time()-started)/1000)});
+            this._clearVisual(window, !caughtUp);
+        };
+        hold.connectObject('new-frame', () => {
+            if (sameFrame(window.get_frame_rect(), target, 1))
+                end(true);
+            else
+                this._showAt(window, actor, target);
+        }, 'completed', () => end(false), this);
+        actor.connectObject('destroy', () => end(false), hold);
+        hold.start();
+    }
+    _clearVisual(window, smooth) {
+        const visual = this._visuals.get(window);
+        if (!visual)
+            return;
+        this._visuals.delete(window);
+        visual.hold?.stop();
+        const actor = window.get_compositor_private();
+        if (!actor)
+            return;
+        const identity = {scale_x: 1, scale_y: 1, translation_x: 0, translation_y: 0};
+        if (smooth) {
+            actor.ease({...identity, duration: RELAX_MS, mode: Clutter.AnimationMode.EASE_OUT_QUAD});
+        } else {
+            actor.remove_all_transitions();
+            Object.assign(actor, identity);
+        }
     }
     // Native maximize/unmaximize transitions are replaced: GNOME's zoom
     // effect is skipped, and a snapshot covers the frame jump while Mutter
@@ -360,6 +436,7 @@ export default class KeyboardMonitorSnap extends Extension {
         const maximized = window.maximizedHorizontally || window.maximizedVertically;
         if (!maximized && (!window.allows_move() || !window.allows_resize())) {
             this._trace(window, 'rejected-capability', {directions});
+            this._clearVisual(window, true);
             return;
         }
         this._busy.add(window);
@@ -410,6 +487,10 @@ export default class KeyboardMonitorSnap extends Extension {
             intended = {layout, monitor, rect: target};
             const applied = await this._place(window, target, monitor, operation);
             this._states.set(window, {...intended, frame:applied.frame});
+            // No animation ran (real frame already on target) but an
+            // interrupted motion left a transform: relax it.
+            if (this._visuals.has(window) && !this._visuals.get(window).hold)
+                this._clearVisual(window, true);
             this._trace(window, 'after-request', {directions});
             if (this._settings.get_boolean('debug-logging')) {
                 const source = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 250, () => {
@@ -425,6 +506,7 @@ export default class KeyboardMonitorSnap extends Extension {
             } else {
                 this._states.delete(window);
                 this._queued.delete(window);
+                this._clearVisual(window, true);
             }
             if (!operation.cancelled) throw error;
         } finally {
@@ -457,6 +539,8 @@ export default class KeyboardMonitorSnap extends Extension {
     disable() {
         this._enabled = false;
         this._cancelOperations();
+        for (const window of [...(this._visuals?.keys() ?? [])])
+            this._clearVisual(window, false);
         for (const source of this._traceTimers ?? [])
             GLib.Source.remove(source);
         this._traceTimers?.clear();

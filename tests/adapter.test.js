@@ -1,11 +1,10 @@
 // Load the actual extension with only its GNOME imports replaced by mocks.
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
+import {sameFrame} from '../placement.js';
 const root = Gio.File.new_for_uri(import.meta.url).get_parent().get_parent().get_path();
 const text = new TextDecoder().decode(GLib.file_get_contents(`${root}/extension.js`)[1]);
 const setup = `
-import {FULL, step, rectangle} from '${Gio.File.new_for_path(root+'/engine.js').get_uri()}';
-import {placeWindow, sameFrame, interpolateRect, travelDuration} from '${Gio.File.new_for_path(root+'/placement.js').get_uri()}';
 export const mock = {animations:false, frames:[], skipped:[], covers:0, focus:null, neighbor:-1, bindings:new Map(), grab:null, tiles:[], values:new Map(), dependencyEnabled:true, timers:new Map(), handler:{}};
 class Settings {
  constructor({schema_id}={}) {this.schema=schema_id??'custom';}
@@ -33,8 +32,17 @@ class Timeline {
  get_progress() {return this.progress;}
  stop() {this.stopped=true;}
  start() {
-  for (const p of [0.25,0.5,0.75,1]) {if(this.stopped)return;this.progress=p;this.handlers['new-frame']?.();}
-  this.handlers.completed?.();
+  const frames=[0.25,0.5,0.75,1];
+  const run=from=>{
+   for (let i=from;i<frames.length;i++) {
+    if(this.stopped)return;
+    // A paused timeline lets a test press keys mid-motion.
+    if(mock.pauseAt===i&&this.duration>150){mock.pauseAt=null;mock.resume=()=>run(i);return;}
+    this.progress=frames[i];this.handlers['new-frame']?.();
+   }
+   if(!this.stopped)this.handlers.completed?.();
+  };
+  run(0);
  }
 }
 const Clutter={Timeline,AnimationMode:{EASE_OUT_CUBIC:1,EASE_OUT_QUAD:2}};
@@ -55,12 +63,18 @@ globalThis.global={window_group:{add_child(){},set_child_above_sibling(){}},disp
 `;
 const folder = GLib.dir_make_tmp('keyboard-snap-tests-XXXXXX');
 const path = `${folder}/adapter.js`;
-GLib.file_set_contents(path, setup + text.replace(/^import .*;\n/gm,''));
+// Local modules keep the extension's own import lists; GNOME imports are mocked.
+const local = text.match(/^import .* from '\.\/.*';$/gm).map(line =>
+ line.replace(/'\.\/(.*)'/, (_m, f) => `'${Gio.File.new_for_path(`${root}/${f}`).get_uri()}'`)).join('\n');
+GLib.file_set_contents(path, local + '\n' + setup + text.replace(/^import .*;\n/gm,''));
 let count=0;
 function assert(v,msg){count++;if(!v)throw new Error(msg);}
 function window(maximized=false){return {monitor:0,maximizedHorizontally:maximized,maximizedVertically:maximized,
  frame:{x:0,y:0,width:1000,height:800},
- actor:{opacity:255,connectObject(){},disconnectObject(){},paint_to_content:()=>({})},
+ actor:{opacity:255,scale_x:1,scale_y:1,translation_x:0,translation_y:0,
+  connectObject(){},disconnectObject(){},paint_to_content:()=>({}),set_pivot_point(){},remove_all_transitions(){},
+  ease(p){for(const k of ['scale_x','scale_y','translation_x','translation_y','opacity'])if(k in p)this[k]=p[k];p.onStopped?.();}},
+ get_buffer_rect(){return {...this.frame};},
  get_compositor_private(){return this.actor;},
  get_id(){return 1;},get_frame_rect(){return {...this.frame};},
  allows_move(){return !this.maximizedHorizontally;},allows_resize(){return !this.maximizedHorizontally;},
@@ -140,6 +154,44 @@ try {
  await e._snap('right');
  assert(a.maximizedHorizontally&&mock.skipped.length===1&&mock.covers===0,'half -> full skips the maximize zoom with no cover');
  assert(mock.frames.some(f=>f.width>500&&f.width<1000),'half -> full grows through real intermediate sizes');
+ // Lagging client: the real frame trails one request behind, yet every
+ // animation frame shows the window exactly on the curve.
+ {
+  const d=window();d.recordPlacement=()=>{};mock.focus=d;mock.neighbor=-1;
+  let pending=null;
+  d.move_resize_frame=function(u,x,y,width,height){if(pending)this.frame=pending;pending={x,y,width,height};};
+  d.move_frame=function(){};
+  const realWait=e._waitForWindow;
+  e._waitForWindow=async(w,p,op)=>{if(pending){w.frame=pending;pending=null;}return realWait(w,p,op);};
+  const shown=[];const realShow=e._showAt.bind(e);
+  e._showAt=(w,actor,rect)=>{realShow(w,actor,rect);const f=w.get_frame_rect(),b=w.get_buffer_rect();
+   shown.push({rect,x:b.x+actor.translation_x+(f.x-b.x)*actor.scale_x,width:f.width*actor.scale_x,scaled:actor.scale_x!==1});};
+  await e._snap('left');
+  assert(shown.length>=4,'each animation frame positions the image');
+  assert(shown.every(v=>Math.abs(v.x-v.rect.x)<1e-6&&Math.abs(v.width-v.rect.width)<1e-6),'image sits exactly on the curve despite client lag');
+  assert(shown.some(v=>v.scaled),'lag is compensated by scaling the image');
+  assert(d.actor.scale_x===1&&d.actor.translation_x===0,'transform relaxed to identity afterwards');
+  assert(!e._visuals.has(d),'no visual state left behind');
+  assert(d.tiledRect.width===500&&d.frame.width===500,'lagging client still confirmed on target');
+  e._waitForWindow=realWait;e._showAt=realShow;
+ }
+ // Interrupt mid-motion: the transform is kept and the next motion starts
+ // from the rectangle on screen, not from the lagging real frame.
+ {
+  const g=window();g.recordPlacement=()=>{};mock.focus=g;mock.neighbor=-1;g.frame={x:0,y:0,width:1000,height:800};
+  const froms=[];const realAnimate=e._animate.bind(e);
+  e._animate=(w,from,to,apply,op)=>{froms.push({...from});return realAnimate(w,from,to,apply,op);};
+  mock.pauseAt=2;
+  const first=e._snap('left');
+  for(let i=0;i<10&&!mock.resume;i++)await Promise.resolve();
+  assert(mock.resume,'first motion paused mid-way');
+  const onScreen={...e._visuals.get(g).rect};
+  e._snap('right');
+  await first;
+  assert(froms.length===2&&sameFrame(froms[1],onScreen,0),'second motion starts from the on-screen rectangle');
+  assert(g.maximizedHorizontally&&!e._visuals.has(g)&&g.actor.scale_x===1,'interrupted left then right ends full, transform cleared');
+  mock.resume=null;e._animate=realAnimate;
+ }
  mock.animations=false;
  // Interrupting: hold the first placement open, press Right twice, then
  // release. Both presses fold into one placement straight to the right half.

@@ -14,6 +14,18 @@ export function interpolateRect(from, to, t) {
     const at = k => Math.round(from[k] + (to[k]-from[k]) * t);
     return {x:at('x'), y:at('y'), width:at('width'), height:at('height')};
 }
+// Actor transform that shows a window whose real frame is `frame` (inside
+// its buffer rect, where the actor sits) at the on-screen rectangle
+// `visual`. Scaling pivots at the actor origin, as in GNOME's own effects.
+export function visualTransform(frame, buffer, visual) {
+    const scaleX = frame.width > 0 ? visual.width / frame.width : 1;
+    const scaleY = frame.height > 0 ? visual.height / frame.height : 1;
+    return {
+        scale_x: scaleX, scale_y: scaleY,
+        translation_x: visual.x - buffer.x - (frame.x - buffer.x) * scaleX,
+        translation_y: visual.y - buffer.y - (frame.y - buffer.y) * scaleY,
+    };
+}
 // Longer moves take a little longer: the largest edge travel, relative to
 // 1000 px, scales the base length by its square root within [0.75, 1.35].
 export function travelDuration(base, from, to) {
