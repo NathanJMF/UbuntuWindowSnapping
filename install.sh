@@ -23,6 +23,12 @@ s.set_strv('enabled-extensions',a)
 Gio.Settings.sync()
 PY
 gsettings set org.gnome.shell.extensions.tiling-assistant enable-tiling-popup false
+# Debug logging follows the branch installed: off for main, on for test
+# branches. Set live, so no log-out is needed for this change.
+branch=$(git -C "$base" rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)
+if [ "$branch" = main ]; then logging=false; else logging=true; fi
+GSETTINGS_SCHEMA_DIR="$base/schemas" gsettings set org.gnome.shell.extensions.keyboard-monitor-snap debug-logging "$logging"
+echo "Debug logging: $logging (branch $branch)"
 if gnome-extensions info "$uuid" >/dev/null 2>&1; then
  gnome-extensions enable "$uuid"
  gnome-extensions info "$uuid"

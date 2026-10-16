@@ -27,6 +27,12 @@ Run as the desktop user, without sudo:
 
 For a newly installed extension on Wayland, save your work, then log out and back in. After updating an already-loaded extension, also log out and back in to load the new JavaScript.
 
+Debug logging follows the branch: installing from `main` turns it off, and installing from any other branch (such as `experiment/animations`) turns it on. It changes immediately, without logging out. To override it by hand:
+
+```bash
+GSETTINGS_SCHEMA_DIR="$PWD/schemas" gsettings set org.gnome.shell.extensions.keyboard-monitor-snap debug-logging false
+```
+
 ## Verify after login
 
 ```bash
