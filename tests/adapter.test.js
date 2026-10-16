@@ -188,7 +188,7 @@ try {
   const realWait=e._waitForWindow;
   e._waitForWindow=async(w,p,op)=>{if(pending){w.frame=pending;pending=null;}return realWait(w,p,op);};
   const shown=[];const realShow=e._showAt.bind(e);
-  e._showAt=(w,actor,rect,anchor,cap)=>{realShow(w,actor,rect,anchor,cap);shown.push({rect,scale:actor.scale_x,drawn:{...e._visuals.get(w).rect}});};
+  e._showAt=(w,actor,rect,shape)=>{realShow(w,actor,rect,shape);shown.push({rect,scale:actor.scale_x,drawn:{...e._visuals.get(w).rect}});};
   await e._snap('left');
   assert(e._latency.get(h)>0,'commit latency measured from a lagging client');
   assert(e._redraw.get(h)>0,'redraw interval measured from successive drawn sizes');
@@ -216,7 +216,7 @@ try {
   const realWait=e._waitForWindow;
   e._waitForWindow=async(w,p,op)=>{w.drawn={...w.frame};return realWait(w,p,op);};
   const shown=[];const realShow=e._showAt.bind(e);
-  e._showAt=(w,actor,r,anchor,cap)=>{realShow(w,actor,r,anchor,cap);
+  e._showAt=(w,actor,r,shape)=>{realShow(w,actor,r,shape);
    shown.push({r,x:actor.x+actor.translation_x+0*actor.scale_x,width:actor.width*actor.scale_x,stale:actor.width!==w.frame.width});};
   e._latency.delete(x);
   await e._snap('left');
@@ -226,12 +226,12 @@ try {
   assert(x.actor.scale_x===1&&!e._visuals.has(x),'transform cleared after X11-style motion');
   e._waitForWindow=realWait;e._showAt=realShow;
  }
- // Look-ahead is the measured lag plus half a redraw interval, capped.
+ // Look-ahead is the measured lag only (content stays on one side), capped.
  {
   const w=window();
-  assert(e._lead(w)===20,'unmeasured window: 16 ms lag + half of 8 ms redraw');
+  assert(e._lead(w)===16,'unmeasured window assumes 16 ms');
   e._latency.set(w,10);e._redraw.set(w,8);
-  assert(e._lead(w)===14,'measured: 10 ms lag + 4 ms');
+  assert(e._lead(w)===10,'measured lag, redraw interval not added');
   e._latency.set(w,200);
   assert(e._lead(w)===120,'look-ahead capped at 120 ms');
  }
@@ -256,6 +256,26 @@ try {
   assert(fast.c.frame.width===500,'continuous requests still end on the exact target');
   const limited=await run(1000);
   assert(limited.requests.length<fast.requests.length,'requests rate-limited when frames come faster than 4 ms');
+ }
+ // Jittery client: drawn sizes land alternately ahead of and behind the
+ // requests. While growing, the image may stretch but must never squash.
+ {
+  const j=window();j.recordPlacement=()=>{};mock.focus=j;mock.neighbor=-1;
+  j.maximizedHorizontally=false;j.frame={x:0,y:0,width:500,height:800};j.drawn={...j.frame};
+  e._states.set(j,{layout:{x:'left',y:null},monitor:0,rect:{x:0,y:0,width:500,height:800},frame:{x:0,y:0,width:500,height:800}});
+  let flip=1;
+  j.move_resize_frame=function(u,x,y,width,height){this.frame={x,y,width,height};flip=-flip;
+   this.drawn={x,y,width:Math.min(1000,width+40*flip),height};};
+  j.move_frame=function(){};
+  const realWait=e._waitForWindow;
+  e._waitForWindow=async(w,p,op)=>{w.drawn={...w.frame};return realWait(w,p,op);};
+  const scales=[];const realShow=e._showAt.bind(e);
+  e._showAt=(w,actor,r,shape)=>{realShow(w,actor,r,shape);scales.push(actor.scale_x);};
+  mock.ints['max-stretch']=6;
+  await e._snap('right');
+  assert(j.maximizedHorizontally,'left half -> Right goes full');
+  assert(scales.length>=4&&scales.every(v=>v>=1),'growing window never squashed despite content jitter');
+  mock.ints['max-stretch']=100;e._waitForWindow=realWait;e._showAt=realShow;
  }
  // Interrupt mid-motion: the transform is kept and the next motion starts
  // from the rectangle on screen, not from the lagging real frame.

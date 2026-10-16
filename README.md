@@ -205,3 +205,12 @@ Version 11 logs (about 360 snaps on 500/200/144 Hz monitors) showed Chromium and
 `FRAME` log lines now include the current look-ahead and the number of undrawn requests.
 
 Validation: 271 checks (121 rules, 75 adapter, 75 delayed placement).
+
+## One-sided stretch (version 13, experiment/animations branch)
+
+Version 12 felt rubbery again. Its logs showed less lag (first-quarter cap hits down from ~75% to ~50%), but content now landed alternately ahead of and behind the curve: Chromium's image flipped between stretched and squashed about 10 times per snap (median), against 0 in version 11.
+
+- **Look-ahead is the measured lag only** again (no half redraw interval), so drawn content meets the curve and then trails it slightly, always on the same side. Continuous requests from version 12 are kept; they are what reduced the lag. The redraw interval is still measured and logged.
+- **Stretch is one-sided.** Per axis, a growing window's image may only be stretched toward the curve and a shrinking window's only compressed. Content that gets ahead is shown at its real size instead of being squashed back, so the image cannot flip direction and its edges never move backwards.
+
+Validation: 278 checks (121 rules, 77 adapter, 80 delayed placement), including a client whose drawn sizes jitter ahead of and behind its requests.

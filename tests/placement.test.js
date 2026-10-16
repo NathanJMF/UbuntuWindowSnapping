@@ -1,4 +1,4 @@
-import {placeWindow,sameFrame,interpolateRect,travelDuration,visualTransform,easeOutCubic,anchorFor} from '../placement.js';
+import {placeWindow,sameFrame,interpolateRect,travelDuration,visualTransform,easeOutCubic,anchorFor,growthFor} from '../placement.js';
 let assertions=0;
 function assert(value,message){assertions++;if(!value)throw new Error(message);}
 function environment({monitor=2,minWidth=0,cancelAt=Infinity,resizeDelay=4,geometryAssignsMonitor=false}={}) {
@@ -142,6 +142,22 @@ for (const [source,dest,target] of [
  assert(Math.abs(right.drawn.x+right.drawn.width-900)<1e-9,'right anchor keeps the visual right edge');
  const still=visualTransform(frame,buffer,visual,{maxStretch:0,anchor:{x:0.5,y:0}});
  assert(still.scale_x===1&&Math.abs(still.drawn.x+200-500)<1e-9,'cap 0 moves only, centred on the visual');
+}
+{
+ // One-sided stretch: growing content that is ahead is never squashed back;
+ // lagging content is still stretched toward the curve.
+ const frame={x:0,y:0,width:600,height:400},buffer={x:0,y:0,width:600,height:400};
+ const grow=growthFor({x:0,y:0,width:500,height:400},{x:0,y:0,width:1000,height:400});
+ assert(grow.x===1&&grow.y===0,'width grows, height unchanged');
+ const ahead=visualTransform(frame,buffer,{x:0,y:0,width:550,height:400},{maxStretch:0.06,growth:grow});
+ assert(ahead.scale_x===1&&ahead.drawn.width===600,'growing content ahead of the curve is shown at real size');
+ const behind=visualTransform(frame,buffer,{x:0,y:0,width:620,height:400},{maxStretch:0.06,growth:grow});
+ assert(Math.abs(behind.scale_x-620/600)<1e-9,'growing content behind is stretched toward the curve');
+ const shrink=growthFor({x:0,y:0,width:1000,height:400},{x:0,y:0,width:500,height:400});
+ const early=visualTransform(frame,buffer,{x:0,y:0,width:650,height:400},{maxStretch:0.06,growth:shrink});
+ assert(early.scale_x===1,'shrinking content ahead (already smaller) is not stretched back');
+ const late=visualTransform(frame,buffer,{x:0,y:0,width:580,height:400},{maxStretch:0.06,growth:shrink});
+ assert(late.scale_x<1,'shrinking content behind is compressed toward the curve');
 }
 function effectsLog(log){return {cover:()=>log.push('cover'),skip:()=>log.push('skip'),uncover:()=>log.push('uncover'),release:()=>log.push('release')};}
 // Animation waits for each intermediate frame like a live client would.

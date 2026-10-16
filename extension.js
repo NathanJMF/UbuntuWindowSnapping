@@ -12,7 +12,7 @@ import {TilingWindowManager as Twm} from 'file:///usr/share/gnome-shell/extensio
 import {Rect} from 'file:///usr/share/gnome-shell/extensions/tiling-assistant@ubuntu.com/src/extension/utility.js';
 import {FULL, step, rectangle} from './engine.js';
 import {placeWindow, sameFrame, interpolateRect, travelDuration, visualTransform,
-    easeOutCubic, anchorFor} from './placement.js';
+    easeOutCubic, anchorFor, growthFor} from './placement.js';
 
 const UUID = 'tiling-assistant@ubuntu.com';
 const rect = r => ({x: r.x, y: r.y, width: r.width, height: r.height});
@@ -29,7 +29,6 @@ const RELAX_MS = 80;
 const LATENCY_WEIGHT = 0.4;
 const MAX_LEAD_MS = 120;
 const DEFAULT_LATENCY_MS = 16;
-const DEFAULT_REDRAW_MS = 8;
 // Size requests go out continuously so a client always renders the newest
 // target, but no more often than this, and at most MAX_PENDING are tracked.
 const MIN_REQUEST_GAP_US = 4000;
@@ -64,7 +63,7 @@ export default class KeyboardMonitorSnap extends Extension {
         // an actor transform, and the post-animation hold timeline.
         this._visuals = new Map();
         // Window -> smoothed milliseconds from a size request until it is
-        // drawn, and between successive redraws during a motion.
+        // drawn, and between successive redraws (diagnostics only).
         this._latency = new WeakMap();
         this._redraw = new WeakMap();
         this._traceTimers = new Set();
@@ -257,6 +256,7 @@ export default class KeyboardMonitorSnap extends Extension {
         }
         const duration = travelDuration(base, from, to);
         const anchor = anchorFor(from, to);
+        const growth = growthFor(from, to);
         const maxStretch = this._maxStretch();
         this._trace(window, 'animate', {from, to, duration, lead:this._lead(window), maxStretch,
             client: window.get_client_type?.() === Meta.WindowClientType.X11 ? 'x11' : 'wayland'});
@@ -279,7 +279,7 @@ export default class KeyboardMonitorSnap extends Extension {
                 actor.disconnectObject(timeline);
                 timeline.stop();
                 if (!error)
-                    this._hold(window, actor, to, anchor, maxStretch);
+                    this._hold(window, actor, to, {anchor, maxStretch, growth});
                 else if (!operation.superseded)
                     this._clearVisual(window, false);
                 // A superseded motion keeps its transform: the next placement
@@ -310,8 +310,8 @@ export default class KeyboardMonitorSnap extends Extension {
                         this._sample(this._redraw, window, (now-lastDrawn.at)/1000);
                     lastDrawn = {width: frame.width, height: frame.height, at: now};
                 }
-                // Ask for the size the curve will reach midway through the
-                // redraw that will show it, so drawn content straddles the curve.
+                // Ask for the size the curve will reach when the client is
+                // expected to draw it.
                 const ahead = interpolateRect(from, to, easeOutCubic((elapsed+this._lead(window))/duration));
                 const last = sent.at(-1);
                 if ((!last || now-last.at >= MIN_REQUEST_GAP_US) && !(last && sameFrame(ahead, last.rect, 0))) {
@@ -321,11 +321,12 @@ export default class KeyboardMonitorSnap extends Extension {
                     apply(ahead);
                 }
                 const curve = interpolateRect(from, to, easeOutCubic(elapsed/duration));
-                this._showAt(window, actor, curve, anchor, maxStretch);
+                this._showAt(window, actor, curve, {anchor, maxStretch, growth});
                 if (this._settings.get_boolean('debug-logging'))
                     console.log(`${this.uuid}: FRAME ${JSON.stringify({id:window.get_id(), elapsed,
                         curve, drawn:frame, mutter:rect(window.get_frame_rect()), requested:sent.at(-1)?.rect ?? null,
                         lead:Math.round(this._lead(window)*10)/10, pending:sent.length,
+                        redraw:Math.round((this._redraw.get(window) ?? 0)*10)/10,
                         scale:[actor.scale_x, actor.scale_y].map(v => Math.round(v*1000)/1000)})}`);
             }, 'completed', () => finish(), this);
             actor.connectObject('destroy', () => finish(new Error('Placement cancelled')), timeline);
@@ -351,19 +352,18 @@ export default class KeyboardMonitorSnap extends Extension {
         const previous = map.get(window);
         map.set(window, previous === undefined ? ms : previous + LATENCY_WEIGHT*(ms-previous));
     }
-    // A drawn frame was requested `latency` ago and stays on screen for one
-    // redraw interval; aiming half an interval past the latency centres the
-    // error between content and curve.
+    // Aim requests one measured lag ahead: content lands on the curve when
+    // drawn and then trails it slightly, always on the same side. Aiming
+    // further (lag + half a redraw, version 12) centred the error but put
+    // content alternately ahead and behind, which read as rubber-banding.
     _lead(window) {
-        const latency = this._latency.get(window) ?? DEFAULT_LATENCY_MS;
-        const redraw = this._redraw.get(window) ?? DEFAULT_REDRAW_MS;
-        return Math.min(MAX_LEAD_MS, latency + redraw/2);
+        return Math.min(MAX_LEAD_MS, this._latency.get(window) ?? DEFAULT_LATENCY_MS);
     }
     // Draw the window actor so its current real frame appears at `rect`,
     // within the stretch cap. Remembers what was actually drawn.
-    _showAt(window, actor, rect, anchor = {x:0, y:0}, maxStretch = null) {
+    _showAt(window, actor, rect, shape = {}) {
         const drawn = this._drawnFrame(window, actor);
-        const t = visualTransform(drawn.frame, drawn.buffer, rect, {maxStretch, anchor});
+        const t = visualTransform(drawn.frame, drawn.buffer, rect, shape);
         actor.set_pivot_point(0, 0);
         actor.scale_x = t.scale_x;
         actor.scale_y = t.scale_y;
@@ -376,7 +376,7 @@ export default class KeyboardMonitorSnap extends Extension {
     }
     // Keep a lagging client visually on target until its frame catches up,
     // or VISUAL_HOLD_MS passes (minimum-size apps never reach it), then relax.
-    _hold(window, actor, target, anchor, maxStretch) {
+    _hold(window, actor, target, shape) {
         const visual = this._visuals.get(window);
         if (!visual)
             return;
@@ -394,7 +394,7 @@ export default class KeyboardMonitorSnap extends Extension {
             if (sameFrame(this._drawnFrame(window, actor).frame, target, 1))
                 end(true);
             else
-                this._showAt(window, actor, target, anchor, maxStretch);
+                this._showAt(window, actor, target, shape);
         }, 'completed', () => end(false), this);
         actor.connectObject('destroy', () => end(false), hold);
         hold.start();
