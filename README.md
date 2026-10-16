@@ -137,7 +137,7 @@ Keyboard snaps no longer use GNOME's size-change effect, which stretched a snaps
 - Leaving a maximized window: a snapshot covers the frame jump while Mutter unmaximizes, then fades out (120 ms) as the live animation starts.
 - Ending full: the frame grows to the work area first, then native maximize is issued with GNOME's zoom effect skipped.
 - Animated crossings do not issue a late `move_to_monitor`, which would briefly re-place the window relative to the source monitor.
-- Presses during an animation are queued (up to three) and run in order instead of being dropped.
+- Presses during an animation are queued (up to three) and run in order instead of being dropped (superseded in version 8).
 - Length: `animation-duration` setting (0 disables). GNOME's global animation switch and slow-down factor are respected. Mouse snapping and Tiling Assistant animations are unchanged.
 
 ```bash
@@ -145,3 +145,11 @@ GSETTINGS_SCHEMA_DIR="$PWD/schemas" gsettings set org.gnome.shell.extensions.key
 ```
 
 Version 7 validation: 223 checks (121 rules, 42 adapter, 60 delayed placement). Live smoothness depends on each application's resize speed and must be checked after logging in.
+
+## Responsiveness (version 8, experiment/animations branch)
+
+- Confirmation checks start immediately and repeat every 16 ms (previously every 25 ms, first check delayed), removing most of the pause after each animation and before an animation starts from a maximized window.
+- Animation length scales with distance: the largest edge travel relative to 1000 px scales the base `animation-duration` by its square root, clamped to 0.75x–1.35x. At 120 ms, half → quarter is about 99 ms, half → full about 136 ms, a monitor crossing up to 162 ms.
+- A press during an animation interrupts it. All presses made meanwhile (up to three) are applied through the rules from the interrupted placement's intended layout, then the window animates straight from where it is to the final target. Right, Right, Right quickly is one trip.
+
+Validation: 233 checks (121 rules, 48 adapter, 64 delayed placement).
