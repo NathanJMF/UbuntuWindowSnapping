@@ -5,13 +5,13 @@ import {sameFrame} from '../placement.js';
 const root = Gio.File.new_for_uri(import.meta.url).get_parent().get_parent().get_path();
 const text = new TextDecoder().decode(GLib.file_get_contents(`${root}/extension.js`)[1]);
 const setup = `
-export const mock = {animations:false, frames:[], skipped:[], covers:0, focus:null, neighbor:-1, bindings:new Map(), grab:null, tiles:[], values:new Map(), dependencyEnabled:true, timers:new Map(), handler:{}};
+export const mock = {ints:{'animation-duration':250,'max-stretch':100}, animations:false, frames:[], skipped:[], covers:0, focus:null, neighbor:-1, bindings:new Map(), grab:null, tiles:[], values:new Map(), dependencyEnabled:true, timers:new Map(), handler:{}};
 class Settings {
  constructor({schema_id}={}) {this.schema=schema_id??'custom';}
  get_strv(k) {return mock.values.get(this.schema+':'+k)??[];}
  set_strv(k,v) {mock.values.set(this.schema+':'+k,v);}
  get_boolean(k) {return false;}
- get_int(k) {return k==='animation-duration'?250:0;}
+ get_int(k) {return mock.ints[k]??0;}
  get_string(k) {return mock.values.get(this.schema+':'+k)??'';}
  set_string(k,v) {mock.values.set(this.schema+':'+k,v);}
 }
@@ -29,7 +29,7 @@ class Timeline {
  constructor({actor,duration}) {this.actor=actor;this.duration=duration;this.handlers={};this.progress=0;}
  connectObject(...args) {for(let i=0;i+1<args.length;i+=2)if(typeof args[i+1]==='function')this.handlers[args[i]]=args[i+1];}
  disconnectObject() {this.handlers={};}
- get_progress() {return this.progress;}
+ get_elapsed_time() {return this.progress*this.duration;}
  stop() {this.stopped=true;}
  start() {
   const frames=[0.25,0.5,0.75,1];
@@ -64,9 +64,9 @@ globalThis.global={window_group:{add_child(){},set_child_above_sibling(){}},disp
 const folder = GLib.dir_make_tmp('keyboard-snap-tests-XXXXXX');
 const path = `${folder}/adapter.js`;
 // Local modules keep the extension's own import lists; GNOME imports are mocked.
-const local = text.match(/^import .* from '\.\/.*';$/gm).map(line =>
+const local = text.match(/^import [^;]* from '\.\/[^']*';$/gm).map(line =>
  line.replace(/'\.\/(.*)'/, (_m, f) => `'${Gio.File.new_for_path(`${root}/${f}`).get_uri()}'`)).join('\n');
-GLib.file_set_contents(path, local + '\n' + setup + text.replace(/^import .*;\n/gm,''));
+GLib.file_set_contents(path, local + '\n' + setup + text.replace(/^import [^;]*;\n/gm,''));
 let count=0;
 function assert(v,msg){count++;if(!v)throw new Error(msg);}
 function window(maximized=false){return {monitor:0,maximizedHorizontally:maximized,maximizedVertically:maximized,
@@ -173,6 +173,33 @@ try {
   assert(d.actor.scale_x===1&&d.actor.translation_x===0,'transform relaxed to identity afterwards');
   assert(!e._visuals.has(d),'no visual state left behind');
   assert(d.tiledRect.width===500&&d.frame.width===500,'lagging client still confirmed on target');
+  e._waitForWindow=realWait;e._showAt=realShow;
+ }
+ // Latency is learned from commits; later motions request ahead of the
+ // frame being drawn. With a stretch cap the image never scales past it and
+ // the fixed edge stays exactly in place.
+ {
+  const h=window();h.recordPlacement=()=>{};mock.focus=h;mock.neighbor=-1;
+  let pending=null;const requests=[];
+  h.move_resize_frame=function(u,x,y,width,height){if(pending)this.frame=pending;pending={x,y,width,height};requests.push({...pending});};
+  h.move_frame=function(){};
+  const realWait=e._waitForWindow;
+  e._waitForWindow=async(w,p,op)=>{if(pending){w.frame=pending;pending=null;}return realWait(w,p,op);};
+  const shown=[];const realShow=e._showAt.bind(e);
+  e._showAt=(w,actor,rect,anchor,cap)=>{realShow(w,actor,rect,anchor,cap);shown.push({rect,scale:actor.scale_x,drawn:{...e._visuals.get(w).rect}});};
+  await e._snap('left');
+  assert(e._latency.get(h)>0,'commit latency measured from a lagging client');
+  requests.length=0;shown.length=0;
+  mock.ints['max-stretch']=6;
+  await e._snap('right');
+  assert(requests[0].width>shown[0].rect.width,'first request leads the drawn curve toward the target');
+  assert(shown.every(v=>Math.abs(v.scale-1)<=0.06+1e-9),'image stretch stays within the 6% cap');
+  assert(shown.every(v=>v.drawn.x===0),'left edge stays fixed while growing to full');
+  assert(h.maximizedHorizontally&&h.actor.scale_x===1&&!e._visuals.has(h),'capped motion still ends full with identity transform');
+  mock.ints['max-stretch']=0;shown.length=0;
+  await e._snap('left');
+  assert(shown.length&&shown.every(v=>v.scale===1),'cap 0 only moves the image');
+  mock.ints['max-stretch']=100;
   e._waitForWindow=realWait;e._showAt=realShow;
  }
  // Interrupt mid-motion: the transform is kept and the next motion starts

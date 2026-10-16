@@ -1,4 +1,4 @@
-import {placeWindow,sameFrame,interpolateRect,travelDuration,visualTransform} from '../placement.js';
+import {placeWindow,sameFrame,interpolateRect,travelDuration,visualTransform,easeOutCubic,anchorFor} from '../placement.js';
 let assertions=0;
 function assert(value,message){assertions++;if(!value)throw new Error(message);}
 function environment({monitor=2,minWidth=0,cancelAt=Infinity,resizeDelay=4,geometryAssignsMonitor=false}={}) {
@@ -124,6 +124,24 @@ for (const [source,dest,target] of [
  assert(br.x===1100&&br.y===750,'frame bottom-right maps to visual bottom-right');
  const id=visualTransform(frame,buffer,frame);
  assert(id.scale_x===1&&id.scale_y===1&&id.translation_x===0&&id.translation_y===0,'caught-up client needs no transform');
+}
+{
+ assert(easeOutCubic(0)===0&&easeOutCubic(1)===1&&easeOutCubic(2)===1&&Math.abs(easeOutCubic(0.5)-0.875)<1e-9,'ease-out cubic curve');
+ const half={x:0,y:0,width:1280,height:1355};
+ const a1=anchorFor(half,{x:0,y:0,width:2560,height:1355});
+ assert(a1.x===0&&a1.y===0,'left edge fixed: anchor left');
+ const a2=anchorFor({x:1280,y:0,width:1280,height:1355},{x:0,y:0,width:2560,height:1355});
+ assert(a2.x===1,'right edge fixed: anchor right');
+ assert(anchorFor(half,{x:3640,y:249,width:1280,height:1355}).x===0.5,'both edges move: anchor centre');
+ const frame={x:100,y:100,width:400,height:300},buffer={x:80,y:80,width:440,height:340};
+ const visual={x:100,y:100,width:800,height:300};
+ const capped=visualTransform(frame,buffer,visual,{maxStretch:0.06,anchor:{x:0,y:0}});
+ assert(Math.abs(capped.scale_x-1.06)<1e-9,'stretch capped at +6%');
+ assert(Math.abs(capped.drawn.x-100)<1e-9&&Math.abs(capped.drawn.width-424)<1e-9,'capped image keeps the anchored left edge');
+ const right=visualTransform(frame,buffer,visual,{maxStretch:0.06,anchor:{x:1,y:0}});
+ assert(Math.abs(right.drawn.x+right.drawn.width-900)<1e-9,'right anchor keeps the visual right edge');
+ const still=visualTransform(frame,buffer,visual,{maxStretch:0,anchor:{x:0.5,y:0}});
+ assert(still.scale_x===1&&Math.abs(still.drawn.x+200-500)<1e-9,'cap 0 moves only, centred on the visual');
 }
 function effectsLog(log){return {cover:()=>log.push('cover'),skip:()=>log.push('skip'),uncover:()=>log.push('uncover'),release:()=>log.push('release')};}
 // Animation waits for each intermediate frame like a live client would.

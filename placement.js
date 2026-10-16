@@ -14,16 +14,44 @@ export function interpolateRect(from, to, t) {
     const at = k => Math.round(from[k] + (to[k]-from[k]) * t);
     return {x:at('x'), y:at('y'), width:at('width'), height:at('height')};
 }
+// Animation curve (ease-out cubic). Evaluated directly, not by the timeline,
+// so the same curve can be sampled ahead of the current time.
+export function easeOutCubic(t) {
+    const x = Math.min(1, Math.max(0, t));
+    return 1 - (1-x)**3;
+}
+// Per axis, which point of the window stays put: 0 = start edge, 1 = end
+// edge, 0.5 = centre (both edges move, e.g. across monitors).
+export function anchorFor(from, to) {
+    const axis = (start, size) => {
+        if (from[start] === to[start]) return 0;
+        if (from[start]+from[size] === to[start]+to[size]) return 1;
+        return 0.5;
+    };
+    return {x: axis('x', 'width'), y: axis('y', 'height')};
+}
 // Actor transform that shows a window whose real frame is `frame` (inside
 // its buffer rect, where the actor sits) at the on-screen rectangle
 // `visual`. Scaling pivots at the actor origin, as in GNOME's own effects.
-export function visualTransform(frame, buffer, visual) {
-    const scaleX = frame.width > 0 ? visual.width / frame.width : 1;
-    const scaleY = frame.height > 0 ? visual.height / frame.height : 1;
+// maxStretch limits scaling to 1 +/- maxStretch (0 = move only; null =
+// unlimited); the anchor point then lands exactly on the visual's.
+// Returns the transform and the rectangle actually drawn.
+export function visualTransform(frame, buffer, visual, {maxStretch = null, anchor = {x:0, y:0}} = {}) {
+    const axis = (start, size, a) => {
+        let scale = frame[size] > 0 ? visual[size] / frame[size] : 1;
+        if (maxStretch !== null)
+            scale = Math.min(1+maxStretch, Math.max(1-maxStretch, scale));
+        const target = visual[start] + a*visual[size];
+        const local = frame[start] - buffer[start] + a*frame[size];
+        const translation = target - buffer[start] - local*scale;
+        const drawnSize = frame[size]*scale;
+        return {scale, translation, drawn: target - a*drawnSize, drawnSize};
+    };
+    const x = axis('x', 'width', anchor.x);
+    const y = axis('y', 'height', anchor.y);
     return {
-        scale_x: scaleX, scale_y: scaleY,
-        translation_x: visual.x - buffer.x - (frame.x - buffer.x) * scaleX,
-        translation_y: visual.y - buffer.y - (frame.y - buffer.y) * scaleY,
+        scale_x: x.scale, scale_y: y.scale, translation_x: x.translation, translation_y: y.translation,
+        drawn: {x: x.drawn, y: y.drawn, width: x.drawnSize, height: y.drawnSize},
     };
 }
 // Longer moves take a little longer: the largest edge travel, relative to

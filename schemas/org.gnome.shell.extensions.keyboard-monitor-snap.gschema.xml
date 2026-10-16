@@ -9,6 +9,11 @@
       <default>120</default>
       <summary>Keyboard snap animation length in milliseconds (0 disables)</summary>
     </key>
+    <key name="max-stretch" type="i">
+      <range min="0" max="100"/>
+      <default>6</default>
+      <summary>Largest stretch of a lagging window's image during snaps, in percent (0 = move only)</summary>
+    </key>
     <key name="debug-logging" type="b"><default>false</default></key>
     <key name="saved-bindings" type="s"><default>''</default></key>
   </schema>

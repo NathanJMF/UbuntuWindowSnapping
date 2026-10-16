@@ -164,3 +164,19 @@ On Wayland a window's position only changes when the application acknowledges a 
 - Debug logging records a `visual-hold` trace with whether the client caught up and how long it took.
 
 Validation: 245 checks (121 rules, 57 adapter, 67 delayed placement), including a client that trails one request behind.
+
+## Less rubber-banding (version 10, experiment/animations branch)
+
+Version 9 drew lagging windows exactly on the curve by stretching the last committed frame; every commit snapped the stretch back, which read as rubber-banding.
+
+- **Request ahead.** Each window's resize latency (request to committed size) is measured and smoothed. Size requests sample the curve that far ahead (16 ms guess for an unmeasured window, at most 120 ms), so commits land close to where the image is already drawn and little stretch is needed. The curve is now evaluated directly (ease-out cubic) on a linear timeline so it can be sampled ahead.
+- **Stretch cap.** The image is never scaled beyond 1 ± `max-stretch` percent (default 6). When capped, the edge that is not moving stays exactly in place (both edges moving: centred), and the image may trail the curve slightly. `0` moves the image only; `100` restores version 9 behaviour. Read at the start of every snap, so it can be tuned live:
+
+```bash
+GSETTINGS_SCHEMA_DIR="$PWD/schemas" gsettings set org.gnome.shell.extensions.keyboard-monitor-snap max-stretch 6
+```
+
+- Interruptions continue from the rectangle actually drawn (after capping).
+- Debug traces include the lead and cap used for each animation.
+
+Validation: 259 checks (121 rules, 63 adapter, 75 delayed placement).
