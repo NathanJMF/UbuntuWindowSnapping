@@ -55,8 +55,6 @@ function environment({monitor=2,minWidth=0,cancelAt=Infinity,resizeDelay=4,geome
  assert(r.frame.width===680,'records accepted minimum width, not requested width');
  assert(r.frame.x===540,'constrained half remains at intended edge');
  assert(!w.maximizedHorizontally&&!w.maximizedVertically,'no partial-maximize flags to race with Chromium');
- const repeated=await placeWindow(w,target,2,{waitFor,both:3,acceptedFrame:r.frame});
- assert(sameFrame(repeated.frame,r.frame),'previous confirmed constrained placement can be reused');
  const leftTarget={x:0,y:32,width:540,height:1835};
  const opposite=await placeWindow(w,leftTarget,2,{waitFor,both:3,
    previousPlacement:{monitor:2,target,frame:r.frame}});

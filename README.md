@@ -11,6 +11,7 @@ Read [RULES.md](RULES.md) for the agreed behaviour. The project changes keyboard
 - `placement.js`: ordered unmaximize, monitor transfer, resize, and maximize requests with confirmation between stages.
 - `schemas/`: the four shortcuts and saved previous bindings.
 - `tests/rules.test.js`: 121 assertions for the agreed behaviour.
+- `tests/lifecycle.test.js`: step-driven timelines, tracked signal connections, cancellable waits and lagging clients for timing-sensitive animation regressions.
 - `tests/adapter.test.js`: regression checks against the actual extension source with mocked GNOME APIs (maximized windows, monitor crossing, per-window reset and cleanup).
 - `install.sh`: test, compile schemas, install locally, retire the old patch, enable for login.
 - `uninstall.sh`: disable this extension and restore previous keyboard bindings. The popup stays disabled.
@@ -216,3 +217,23 @@ Version 12 felt rubbery again. Its logs showed less lag (first-quarter cap hits 
 Validation: 278 checks (121 rules, 77 adapter, 80 delayed placement), including a client whose drawn sizes jitter ahead of and behind its requests.
 
 Default stretch cap lowered to 3% after live comparison (version 13): less visible bounce, with YouTube and terminals resizing well. Terminals resized vertically can still show text shifting slightly; this comes from the terminal's own row layout (it also happens when resizing with the mouse), not from the stretch.
+
+## Review fixes (version 14, experiment/animations branch)
+
+An independent code review of version 13 found these, now fixed:
+
+- **Stale hold transform.** `Clutter.Timeline.stop()` emits `stopped`, not `completed`, so a hold interrupted by a new motion never detached its handlers. A quick Up, Left, Down, Left could leave the window drawn about 3% scaled until the next animation. Every exit now goes through one detach.
+- **Latency biased low.** Re-sent final targets were "acknowledged" one frame later, pulling a 40 ms lag down to about 25 ms. Commits are now matched only when a new size is drawn, exact sizes are preferred over the 3 px tolerance, a drawn request is never re-sent, same-size moves record no samples, and requested curve time never moves backwards.
+- **Window closed mid-motion.** Animations and holds now stop on `unmanaging`, before GNOME's close effect, instead of driving the closing window until its actor is destroyed.
+- **Fullscreen and maximized.** Leaving both is two native size changes; GNOME's effect is now suppressed for each until the placement finishes.
+- **Cleanups:**
+  - A window is marked busy only after its operation is set up.
+  - A superseded state is dropped if the follow-up cannot run.
+  - Anchors allow 1 px rounding.
+  - While a cover fades, the restored floating frame maps exactly onto the curve.
+  - Disabling restores only keys that still hold the value the extension wrote, and resets values that equal the default instead of pinning them.
+  - The unused `acceptedFrame` path is removed.
+
+The dependency watcher still polls every 500 ms: it also detects a fast Tiling Assistant restart by handler identity, which a state-change signal alone would not.
+
+Validation: 349 checks (121 rules, 77 adapter, 79 delayed placement, 72 lifecycle).

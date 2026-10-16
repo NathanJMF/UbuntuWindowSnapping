@@ -23,9 +23,10 @@ export function easeOutCubic(t) {
 // Per axis, which point of the window stays put: 0 = start edge, 1 = end
 // edge, 0.5 = centre (both edges move, e.g. across monitors).
 export function anchorFor(from, to) {
+    // 1 px tolerance: an interrupted motion starts from a rounded rectangle.
     const axis = (start, size) => {
-        if (from[start] === to[start]) return 0;
-        if (from[start]+from[size] === to[start]+to[size]) return 1;
+        if (Math.abs(from[start]-to[start]) <= 1) return 0;
+        if (Math.abs(from[start]+from[size]-to[start]-to[size]) <= 1) return 1;
         return 0.5;
     };
     return {x: axis('x', 'width'), y: axis('y', 'height')};
@@ -76,15 +77,8 @@ export function travelDuration(base, from, to) {
 // animate(from, to, apply) drives real frame changes so the client redraws
 // at every intermediate size. effects hides native maximize transitions.
 export async function placeWindow(window, target, monitor, {waitFor, both, constrain, clearConstraints,
-    acceptedFrame = null, previousPlacement = null, animate = null, effects = null}) {
+    previousPlacement = null, animate = null, effects = null}) {
     const full = sameFrame(target, window.get_work_area_for_monitor(monitor), 0);
-    // acceptedFrame must come from a prior confirmed placement of this same
-    // target; it cannot be inferred from an arbitrary oversized current frame.
-    if (acceptedFrame && window.get_monitor() === monitor &&
-        sameFrame(window.get_frame_rect(), acceptedFrame) &&
-        (full ? window.maximizedHorizontally && window.maximizedVertically
-              : !window.maximizedHorizontally && !window.maximizedVertically))
-        return {frame:frameCopy(window.get_frame_rect()), full};
     try {
         return await placeStages(window, target, monitor, full,
             {waitFor, both, constrain, clearConstraints, previousPlacement, animate, effects});

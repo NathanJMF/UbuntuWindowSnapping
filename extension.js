@@ -66,6 +66,8 @@ export default class KeyboardMonitorSnap extends Extension {
         // drawn, and between successive redraws (diagnostics only).
         this._latency = new WeakMap();
         this._redraw = new WeakMap();
+        // Window -> monotonic time until which the image maps exactly.
+        this._exactUntil = new WeakMap();
         this._traceTimers = new Set();
         this._operations = new Map();
         this._enabled = true;
@@ -135,6 +137,7 @@ export default class KeyboardMonitorSnap extends Extension {
             Boolean(dependency.settings?.getGioObject());
     }
     _takeBindings() {
+        // saved-bindings keeps each key's value from before we took it.
         let saved = this._settings.get_string('saved-bindings');
         saved = saved ? JSON.parse(saved) : {};
         for (const [schema, keys] of Object.entries(OWNED)) {
@@ -261,15 +264,22 @@ export default class KeyboardMonitorSnap extends Extension {
         this._trace(window, 'animate', {from, to, duration, lead:this._lead(window), maxStretch,
             client: window.get_client_type?.() === Meta.WindowClientType.X11 ? 'x11' : 'wayland'});
         // A previous hold or relax transition is superseded by this motion.
-        this._visuals.get(window)?.hold?.stop();
+        this._visuals.get(window)?.stopHold?.();
         actor.remove_all_transitions();
+        // Same-size moves give no size commits to time.
+        const measurable = from.width !== to.width || from.height !== to.height;
         return new Promise((resolve, reject) => {
             // Linear timeline: the curve is evaluated directly so requests can
             // sample it ahead of the frame being drawn.
             const timeline = new Clutter.Timeline({actor, duration});
-            // Requests not yet seen drawn, oldest first.
+            // Requests not yet seen drawn, oldest first; the newest request is
+            // also kept separately so a drawn one is never sent again.
             const sent = [];
+            let lastRequest = null;
             let lastDrawn = null;
+            // Curve time requested so far: never moves backwards, even when
+            // the latency estimate drops mid-motion.
+            let aimed = 0;
             let finished = false;
             const finish = error => {
                 if (finished) return;
@@ -277,11 +287,12 @@ export default class KeyboardMonitorSnap extends Extension {
                 operation.cancelAnimation = null;
                 timeline.disconnectObject(this);
                 actor.disconnectObject(timeline);
+                window.disconnectObject?.(timeline);
                 timeline.stop();
                 if (!error)
                     this._hold(window, actor, to, {anchor, maxStretch, growth});
                 else if (!operation.superseded)
-                    this._clearVisual(window, false);
+                    this._clearVisual(window, false, actor);
                 // A superseded motion keeps its transform: the next placement
                 // starts from this on-screen rectangle without a jump.
                 error ? reject(error) : resolve();
@@ -293,43 +304,63 @@ export default class KeyboardMonitorSnap extends Extension {
                 // as soon as a size is requested, long before the client draws it.
                 const frame = this._drawnFrame(window, actor).frame;
                 const now = GLib.get_monotonic_time();
-                // The newest request this frame matches has committed; its age
-                // is one latency sample. Older requests were skipped by the client.
-                const sizeMatches = r => Math.abs(frame.width-r.width) <= 3 && Math.abs(frame.height-r.height) <= 3;
-                let acked = -1;
-                for (let i = sent.length-1; i >= 0; i--) {
-                    if (sizeMatches(sent[i].rect)) { acked = i; break; }
-                }
-                if (acked !== -1) {
-                    this._sample(this._latency, window, (now-sent[acked].at)/1000);
-                    sent.splice(0, acked+1);
-                }
-                // Each new drawn size ends one redraw interval.
+                // Only a newly drawn size is a commit: the newest request it
+                // matches gives one latency sample (older ones were skipped by
+                // the client), and the time since the last commit one redraw.
                 if (!lastDrawn || lastDrawn.width !== frame.width || lastDrawn.height !== frame.height) {
-                    if (lastDrawn)
+                    if (lastDrawn && measurable)
                         this._sample(this._redraw, window, (now-lastDrawn.at)/1000);
                     lastDrawn = {width: frame.width, height: frame.height, at: now};
+                    // Exact sizes first: late in a motion successive requests
+                    // differ by under 3 px, and a loose match would pair the
+                    // drawn size with a newer request and under-read the lag.
+                    // The tolerance covers clients that adjust sizes slightly.
+                    const newest = tolerance => {
+                        for (let i = sent.length-1; i >= 0; i--) {
+                            if (Math.abs(frame.width-sent[i].rect.width) <= tolerance &&
+                                Math.abs(frame.height-sent[i].rect.height) <= tolerance)
+                                return i;
+                        }
+                        return -1;
+                    };
+                    let acked = newest(0);
+                    if (acked === -1)
+                        acked = newest(3);
+                    if (acked !== -1) {
+                        if (measurable)
+                            this._sample(this._latency, window, (now-sent[acked].at)/1000);
+                        sent.splice(0, acked+1);
+                    }
                 }
                 // Ask for the size the curve will reach when the client is
                 // expected to draw it.
-                const ahead = interpolateRect(from, to, easeOutCubic((elapsed+this._lead(window))/duration));
-                const last = sent.at(-1);
-                if ((!last || now-last.at >= MIN_REQUEST_GAP_US) && !(last && sameFrame(ahead, last.rect, 0))) {
-                    sent.push({rect: ahead, at: now});
+                aimed = Math.max(aimed, elapsed + this._lead(window));
+                const ahead = interpolateRect(from, to, easeOutCubic(aimed/duration));
+                if ((!lastRequest || now-lastRequest.at >= MIN_REQUEST_GAP_US) &&
+                    !(lastRequest && sameFrame(ahead, lastRequest.rect, 0))) {
+                    lastRequest = {rect: ahead, at: now};
+                    sent.push(lastRequest);
                     if (sent.length > MAX_PENDING)
                         sent.shift();
                     apply(ahead);
                 }
                 const curve = interpolateRect(from, to, easeOutCubic(elapsed/duration));
-                this._showAt(window, actor, curve, {anchor, maxStretch, growth});
+                // While a cover fades, the restored floating frame underneath
+                // is mapped exactly onto the curve; the cap applies afterwards.
+                const exact = now < (this._exactUntil.get(window) ?? 0);
+                this._showAt(window, actor, curve, exact
+                    ? {anchor, maxStretch: null, growth: {x: 0, y: 0}} : {anchor, maxStretch, growth});
                 if (this._settings.get_boolean('debug-logging'))
                     console.log(`${this.uuid}: FRAME ${JSON.stringify({id:window.get_id(), elapsed,
-                        curve, drawn:frame, mutter:rect(window.get_frame_rect()), requested:sent.at(-1)?.rect ?? null,
+                        curve, drawn:frame, mutter:rect(window.get_frame_rect()), requested:lastRequest?.rect ?? null,
                         lead:Math.round(this._lead(window)*10)/10, pending:sent.length,
                         redraw:Math.round((this._redraw.get(window) ?? 0)*10)/10,
                         scale:[actor.scale_x, actor.scale_y].map(v => Math.round(v*1000)/1000)})}`);
             }, 'completed', () => finish(), this);
-            actor.connectObject('destroy', () => finish(new Error('Placement cancelled')), timeline);
+            actor.connectObject('destroy', () => operation.cancel(), timeline);
+            // A closing window keeps its actor for GNOME's close effect; stop
+            // driving it as soon as it is unmanaged.
+            window.connectObject?.('unmanaging', () => operation.cancel(), timeline);
             timeline.start();
         });
     }
@@ -381,14 +412,26 @@ export default class KeyboardMonitorSnap extends Extension {
         if (!visual)
             return;
         const hold = new Clutter.Timeline({actor, duration: VISUAL_HOLD_MS});
-        visual.hold = hold;
         const started = GLib.get_monotonic_time();
-        const end = caughtUp => {
+        // Clutter.Timeline.stop() emits 'stopped', not 'completed': every
+        // way out of the hold goes through detach to drop its handlers.
+        const detach = () => {
             hold.disconnectObject(this);
             actor.disconnectObject(hold);
+            window.disconnectObject?.(hold);
             hold.stop();
+            if (visual.stopHold === detach)
+                visual.stopHold = null;
+        };
+        visual.stopHold = detach;
+        const end = caughtUp => {
+            detach();
             this._trace(window, 'visual-hold', {caughtUp, ms:Math.round((GLib.get_monotonic_time()-started)/1000)});
-            this._clearVisual(window, !caughtUp);
+            this._clearVisual(window, !caughtUp, actor);
+        };
+        const gone = () => {
+            detach();
+            this._clearVisual(window, false, actor);
         };
         hold.connectObject('new-frame', () => {
             if (sameFrame(this._drawnFrame(window, actor).frame, target, 1))
@@ -396,16 +439,18 @@ export default class KeyboardMonitorSnap extends Extension {
             else
                 this._showAt(window, actor, target, shape);
         }, 'completed', () => end(false), this);
-        actor.connectObject('destroy', () => end(false), hold);
+        actor.connectObject('destroy', gone, hold);
+        window.connectObject?.('unmanaging', gone, hold);
         hold.start();
     }
-    _clearVisual(window, smooth) {
+    // `actor` is passed where known: an unmanaged window may no longer
+    // report its actor while GNOME's close effect still shows it.
+    _clearVisual(window, smooth, actor = window.get_compositor_private()) {
         const visual = this._visuals.get(window);
         if (!visual)
             return;
         this._visuals.delete(window);
-        visual.hold?.stop();
-        const actor = window.get_compositor_private();
+        visual.stopHold?.();
         if (!actor)
             return;
         const identity = {scale_x: 1, scale_y: 1, translation_x: 0, translation_y: 0};
@@ -424,12 +469,20 @@ export default class KeyboardMonitorSnap extends Extension {
         let cover = null;
         let skipped = false;
         let hidden = false;
+        let rearm = null;
         const enabled = () => actor && this._animationDuration() > 0;
         return {
+            // skipNextEffect covers one size change, but leaving fullscreen
+            // and maximized are two, possibly delivered later. Until release,
+            // re-arm the skip after GNOME's handler (connected first) uses it.
             skip: () => {
                 if (!enabled()) return;
                 Main.wm.skipNextEffect(actor);
                 skipped = true;
+                rearm ??= global.window_manager.connect('size-change', (_wm, changed) => {
+                    if (changed === actor)
+                        Main.wm.skipNextEffect(actor);
+                });
             },
             cover: rect => {
                 if (!enabled() || cover) return;
@@ -454,6 +507,7 @@ export default class KeyboardMonitorSnap extends Extension {
                 cover = null;
                 actor.opacity = 255;
                 hidden = false;
+                this._exactUntil.set(window, GLib.get_monotonic_time() + COVER_FADE_MS*1000);
                 fading.ease({opacity: 0, duration: COVER_FADE_MS,
                     mode: Clutter.AnimationMode.EASE_OUT_QUAD,
                     onStopped: () => fading.destroy()});
@@ -468,6 +522,9 @@ export default class KeyboardMonitorSnap extends Extension {
                         actor.opacity = 255;
                     hidden = false;
                     // An unused skip would swallow the next unrelated effect.
+                    if (rearm !== null)
+                        global.window_manager.disconnect(rearm);
+                    rearm = null;
                     if (skipped)
                         Main.wm._skippedActors?.delete(actor);
                 }
@@ -517,10 +574,14 @@ export default class KeyboardMonitorSnap extends Extension {
         if (!maximized && (!window.allows_move() || !window.allows_resize())) {
             this._trace(window, 'rejected-capability', {directions});
             this._clearVisual(window, true);
+            // An interrupted placement's intended layout is no longer valid.
+            if (this._states.get(window)?.superseded)
+                this._states.delete(window);
             return;
         }
+        const owner = this._dependency.stateObj._keybindingHandler;
         this._busy.add(window);
-        const operation = {owner:this._dependency.stateObj._keybindingHandler, cancelled:false,
+        const operation = {owner, cancelled:false,
             cancel() {this.cancelled=true; this.cancelWait?.(); this.cancelAnimation?.();},
             supersede() {if (!this.cancelled) {this.superseded=true; this.cancel();}}};
         this._operations.set(window, operation);
@@ -569,7 +630,7 @@ export default class KeyboardMonitorSnap extends Extension {
             this._states.set(window, {...intended, frame:applied.frame});
             // No animation ran (real frame already on target) but an
             // interrupted motion left a transform: relax it.
-            if (this._visuals.has(window) && !this._visuals.get(window).hold)
+            if (this._visuals.has(window) && !this._visuals.get(window).stopHold)
                 this._clearVisual(window, true);
             this._trace(window, 'after-request', {directions});
             if (this._settings.get_boolean('debug-logging')) {
@@ -604,17 +665,32 @@ export default class KeyboardMonitorSnap extends Extension {
         if (this._settings) {
             const raw = this._settings.get_string('saved-bindings');
             if (raw) {
-                for (const [schema, keys] of Object.entries(JSON.parse(raw))) {
-                    const settings = new Gio.Settings({schema_id: schema});
-                    for (const [key, values] of Object.entries(keys))
-                        settings.set_strv(key, values);
-                }
+                for (const [schema, keys] of Object.entries(JSON.parse(raw)))
+                    this._restoreSchema(schema, keys);
                 this._settings.set_string('saved-bindings', '');
             }
         }
         this._keys = [];
         this._active = false;
         this._bindingOwner = null;
+    }
+    // Put back only keys still holding the value we wrote; a key the user
+    // changed meanwhile is theirs. A saved value equal to the default is
+    // reset rather than written, so it keeps following the system default.
+    _restoreSchema(schema, keys) {
+        const settings = new Gio.Settings({schema_id: schema});
+        const same = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
+        for (const [key, values] of Object.entries(keys)) {
+            const binding = OWNED[schema]?.[key];
+            const ours = binding ? values.filter(v => v !== binding) : values;
+            if (!same(settings.get_strv(key), ours))
+                continue;
+            const fallback = settings.get_default_value?.(key)?.deepUnpack?.();
+            if (Array.isArray(fallback) && same(fallback, values))
+                settings.reset(key);
+            else
+                settings.set_strv(key, values);
+        }
     }
     disable() {
         this._enabled = false;

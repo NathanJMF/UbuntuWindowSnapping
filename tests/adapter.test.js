@@ -58,7 +58,7 @@ const Twm={clearTilingProps:()=>{},updateTileGroup:()=>{},saveTileState:()=>{},i
   const full=new Rect(a).equal(r);
   w.maximizedHorizontally=full;w.maximizedVertically=full;w.isTiled=!full;w.tiledRect=full?null:r;
  }};
-globalThis.global={window_group:{add_child(){},set_child_above_sibling(){}},display:{get focus_window(){return mock.focus;},
+globalThis.global={window_manager:{connect:()=>1,disconnect(){}},window_group:{add_child(){},set_child_above_sibling(){}},display:{get focus_window(){return mock.focus;},
  get_monitor_neighbor_index:()=>mock.neighbor,connect:(n,cb)=>{mock.grab=cb;return 1;},disconnect:()=>{mock.grab=null;}}};
 `;
 const folder = GLib.dir_make_tmp('keyboard-snap-tests-XXXXXX');
@@ -199,7 +199,8 @@ try {
   assert(shown.every(v=>Math.abs(v.scale-1)<=0.06+1e-9),'image stretch stays within the 6% cap');
   assert(shown.every(v=>v.drawn.x===0),'left edge stays fixed while growing to full');
   assert(h.maximizedHorizontally&&h.actor.scale_x===1&&!e._visuals.has(h),'capped motion still ends full with identity transform');
-  mock.ints['max-stretch']=0;shown.length=0;
+  // Not maximized: no cover, so no exact mapping during a cover fade.
+  mock.ints['max-stretch']=0;shown.length=0;h.maximizedHorizontally=h.maximizedVertically=false;
   await e._snap('left');
   assert(shown.length&&shown.every(v=>v.scale===1),'cap 0 only moves the image');
   mock.ints['max-stretch']=100;
