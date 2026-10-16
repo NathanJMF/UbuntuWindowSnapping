@@ -32,7 +32,14 @@ Perpendicular directions combine, in either order:
 | Down then Left, or Left then Down | Bottom-left quarter |
 | Down then Right, or Right then Down | Bottom-right quarter |
 
-An opposite direction replaces that axis and retains the other one. Examples: Left half then Right becomes Right half; Top-left quarter then Right becomes Top-right quarter; Top-left then Down becomes Bottom-left.
+From a half, pressing the opposite direction first maximizes on the current monitor. Another press then selects the opposite half. This never crosses monitors during the full-size intermediate step:
+
+- Left half → Right → full → Right → right half.
+- Right half → Left → full → Left → left half.
+- Top half → Down → full → Down → bottom half.
+- Bottom half → Up → full → Up → top half.
+
+Quarter opposite-direction behaviour remains unchanged: it replaces that axis and retains the other one. Top-left quarter then Right becomes Top-right quarter; Top-left then Down becomes Bottom-left.
 
 ## Repeated direction and monitor movement
 

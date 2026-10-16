@@ -39,8 +39,17 @@ for (const x of ['left','right']) {
 }
 const crossing = sequence(['left','left','down'], d => d === 'left');
 equal(crossing[2].layout, {x:null,y:'down'}, 'new monitor starts a fresh half sequence');
-equal(sequence(['left','right'])[1].layout, {x:'right',y:null}, 'opposite arrow selects opposite half');
-equal(sequence(['up','down'])[1].layout, {x:null,y:'down'}, 'opposite vertical selects opposite half');
+equal(sequence(['left','right'])[1].layout, {...FULL}, 'left half then Right restores full');
+equal(sequence(['up','down'])[1].layout, {...FULL}, 'top half then Down restores full');
+for (const [first,opposite] of [['left','right'],['right','left'],['up','down'],['down','up']]) {
+    for (const neighbors of [false,true]) {
+        const results=sequence([first,opposite,opposite],()=>neighbors);
+        const half={x:null,y:null};half[['left','right'].includes(opposite)?'x':'y']=opposite;
+        equal(results[1],{layout:{...FULL},cross:null},`${first} -> ${opposite} first goes full, neighbor=${neighbors}`);
+        equal(results[2],{layout:half,cross:null},`${first} -> ${opposite} -> ${opposite} then half, neighbor=${neighbors}`);
+    }
+}
+equal(sequence(['up','left','right'])[2].layout,{x:'right',y:'up'},'opposite-quarter rule remains unchanged');
 for (const d of ['left','right','up','down']) {
     equal(step(FULL,d,false),step(FULL,d,true),`${d} cannot cross on first press`);
 }

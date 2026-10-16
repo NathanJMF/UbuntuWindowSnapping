@@ -88,6 +88,10 @@ try {
  a.maximizedHorizontally=true;a.maximizedVertically=true;
  await e._snap('left');
  assert(a.monitor===0&&!a.maximizedHorizontally,'app maximize resets stale half history');
+ await e._snap('right');
+ assert(a.monitor===0&&a.maximizedHorizontally&&a.maximizedVertically,'opposite arrow from left half goes full locally');
+ await e._snap('right');
+ assert(a.monitor===0&&a.tiledRect.x===500&&a.tiledRect.width===500,'next opposite arrow selects right half locally');
  const beforeDependency=mock.tiles.length;
  mock.dependencyEnabled=false;
  await e._snap('left');
