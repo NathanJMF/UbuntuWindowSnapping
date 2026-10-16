@@ -76,29 +76,39 @@ export function travelDuration(base, from, to) {
 }
 // animate(from, to, apply) drives real frame changes so the client redraws
 // at every intermediate size. effects hides native maximize transitions.
+// monitorExists(index) guards every call that takes a monitor index: Mutter
+// aborts on an index that no longer exists (monitor unplugged mid-placement).
 export async function placeWindow(window, target, monitor, {waitFor, both, constrain, clearConstraints,
-    previousPlacement = null, animate = null, effects = null}) {
+    previousPlacement = null, animate = null, effects = null, monitorExists = null}) {
+    const checkMonitor = () => {
+        if (monitorExists && !monitorExists(monitor))
+            throw Object.assign(new Error('Placement cancelled: monitor removed'), {cancelled: true});
+    };
+    checkMonitor();
     const full = sameFrame(target, window.get_work_area_for_monitor(monitor), 0);
     try {
         return await placeStages(window, target, monitor, full,
-            {waitFor, both, constrain, clearConstraints, previousPlacement, animate, effects});
+            {waitFor, both, constrain, clearConstraints, previousPlacement, animate, effects, checkMonitor});
     } finally {
         effects?.release();
     }
 }
 async function placeStages(window, target, monitor, full, {waitFor, both, constrain, clearConstraints,
-    previousPlacement, animate, effects}) {
+    previousPlacement, animate, effects, checkMonitor}) {
     // Where the window visibly is now; the animation starts here even if
     // unmaximizing restores an older floating frame underneath the cover.
     const start = frameCopy(window.get_frame_rect());
-    if (window.fullscreen || window.maximizedHorizontally || window.maximizedVertically) {
+    if (window.fullscreen || window.maximizedHorizontally || window.maximizedVertically)
         effects?.cover(start);
+    // Each native state change gets its own effect skip, armed only around
+    // the call and its wait, so close/minimize effects are not swallowed.
+    if (window.fullscreen) {
         effects?.skip();
-    }
-    if (window.fullscreen)
         window.unmake_fullscreen();
+    }
     window.unminimize();
     if (window.maximizedHorizontally || window.maximizedVertically) {
+        effects?.skip();
         if (window.get_maximized)
             window.unmaximize(window.get_maximized());
         else if (window.unmaximize.length === 0)
@@ -107,6 +117,7 @@ async function placeStages(window, target, monitor, full, {waitFor, both, constr
             window.unmaximize(both);
     }
     await waitFor(() => !window.maximizedHorizontally && !window.maximizedVertically && !window.fullscreen, 'unmaximize');
+    effects?.settle?.();
     if (!window.allows_move() || !window.allows_resize())
         throw new Error('Window cannot move or resize after unmaximizing');
     const before = frameCopy(window.get_frame_rect());
@@ -132,6 +143,7 @@ async function placeStages(window, target, monitor, full, {waitFor, both, constr
     }
     // After an animated crossing the frame already sits on the destination;
     // a late move_to_monitor would briefly re-place it relative to the source.
+    checkMonitor();
     if (window.get_monitor() !== monitor && !(animated && centeredIn(window.get_frame_rect(),
         window.get_work_area_for_monitor(monitor))))
         window.move_to_monitor(monitor);
@@ -158,6 +170,7 @@ async function placeStages(window, target, monitor, full, {waitFor, both, constr
         // original ~125 ms guard for minimum-size clients.
         return onMonitor && positioned && constrained && sizeChanged && stable >= 8;
     }, 'monitor-and-frame');
+    checkMonitor();
     constrain?.(window, target, monitor);
     if (full) {
         // Never issue maximize while a move_to_monitor is still pending.

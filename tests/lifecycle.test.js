@@ -9,7 +9,7 @@ import {anchorFor} from '../placement.js';
 const root = Gio.File.new_for_uri(import.meta.url).get_parent().get_parent().get_path();
 const text = new TextDecoder().decode(GLib.file_get_contents(`${root}/extension.js`)[1]);
 const setup = `
-export const mock = {clock:0, ints:{'animation-duration':120,'max-stretch':3}, timelines:[], focus:null,
+export const mock = {later:[], missingKeys:new Set(), missingSchemas:new Set(), lateUnmaximize:0, halfEase:false, lateSizeChange:false, monitors:2, invalidMonitorCalls:[], clock:0, ints:{'animation-duration':120,'max-stretch':3}, timelines:[], focus:null,
  neighbor:-1, bindings:new Map(), values:new Map(), defaults:new Map(), resets:[], handler:{}, grab:null,
  timers:new Map(), pending:[], nativeEffects:0, skippedEffects:0};
 export function signals(o) {
@@ -25,8 +25,14 @@ export function signals(o) {
  return o;
 }
 class Settings {
- constructor({schema_id}={}) {this.schema = schema_id ?? 'custom';}
- get_strv(k) {return mock.values.get(this.schema+':'+k) ?? mock.defaults.get(this.schema+':'+k) ?? [];}
+ constructor({schema_id}={}) {
+  if (mock.missingSchemas.has(schema_id)) throw new Error(\`GSettings schema \${schema_id} not found\`);
+  this.schema = schema_id ?? 'custom';
+ }
+ get_strv(k) {
+  if (mock.missingKeys.has(this.schema+':'+k)) throw new Error(\`GSettings key \${k} not found\`);
+  return mock.values.get(this.schema+':'+k) ?? mock.defaults.get(this.schema+':'+k) ?? [];
+ }
  set_strv(k, v) {mock.values.set(this.schema+':'+k, v);}
  get_default_value(k) {const d = mock.defaults.get(this.schema+':'+k); return d ? {deepUnpack:() => [...d]} : null;}
  reset(k) {mock.values.delete(this.schema+':'+k); mock.resets.push(this.schema+':'+k);}
@@ -58,7 +64,7 @@ class Timeline {
  }
 }
 const Clutter = {Timeline, AnimationMode:{EASE_OUT_QUAD:2}};
-const Main = {extensionManager:{lookup:() => ({stateObj:{_twm:Twm, _keybindingHandler:mock.handler,
+const Main = {layoutManager:signals({}), extensionManager:{lookup:() => ({stateObj:{_twm:Twm, _keybindingHandler:mock.handler,
   settings:{getGioObject:() => ({})}}})},
  wm:{_skippedActors:new Set(), skipNextEffect(a) {this._skippedActors.add(a);},
   addKeybinding:k => mock.bindings.set(k, 1), removeKeybinding:k => mock.bindings.delete(k)}};
@@ -67,7 +73,10 @@ const Twm = {clearTilingProps() {}, updateTileGroup() {}, saveTileState() {},
  isMaximized:w => w.maximizedHorizontally && w.maximizedVertically};
 globalThis.global = {window_manager:signals({}), window_group:{add_child() {}, set_child_above_sibling() {}},
  display:{get focus_window() {return mock.focus;}, get_monitor_neighbor_index:() => mock.neighbor,
+  get_n_monitors:() => mock.monitors,
   connect:(n, cb) => {mock.grab = cb; return 1;}, disconnect() {}}};
+mock.skipped = Main.wm._skippedActors;
+export const layout = Main.layoutManager;
 // GNOME Shell's own handler is connected first and consumes skips.
 global.window_manager.connect('size-change', (_wm, actor) => {
  if (Main.wm._skippedActors.delete(actor)) mock.skippedEffects++;
@@ -82,7 +91,7 @@ GLib.file_set_contents(path, local + '\n' + setup + text.replace(/^import [^;]*;
 let count = 0;
 function assert(v, msg) {count++; if (!v) throw new Error(msg);}
 try {
-const {default:Ext, mock, signals} = await import(Gio.File.new_for_path(path).get_uri());
+const {default:Ext, mock, signals, layout} = await import(Gio.File.new_for_path(path).get_uri());
 const AREAS = [{x:0, y:0, width:1000, height:800}, {x:1000, y:0, width:1000, height:800}];
 // A client that draws each requested size `lag` ms after the request.
 function makeWindow({frame = {x:100, y:100, width:600, height:400}, lag = 40, maximized = false, fullscreen = false} = {}) {
@@ -90,18 +99,42 @@ function makeWindow({frame = {x:100, y:100, width:600, height:400}, lag = 40, ma
         frame:{...frame}, drawn:{...frame}, queue:[], requests:[], unmanaged:false, resizable:true});
     w.actor = signals({opacity:255, scale_x:1, scale_y:1, translation_x:0, translation_y:0,
         set_pivot_point() {}, remove_all_transitions() {}, paint_to_content:() => ({}),
-        ease(p) {for (const k of ['scale_x','scale_y','translation_x','translation_y']) if (k in p) this[k] = p[k]; p.onStopped?.();}});
+        ease(p) {
+            const keys = ['scale_x','scale_y','translation_x','translation_y'].filter(k => k in p);
+            if (mock.halfEase) {for (const k of keys) this[k] = (this[k]+p[k])/2; return;}
+            for (const k of keys) this[k] = p[k];
+            p.onStopped?.();
+        }});
     for (const k of ['x','y','width','height'])
         Object.defineProperty(w.actor, k, {get:() => w.drawn[k]});
-    const sizeChange = () => mock.pending.push(() => global.window_manager.emit('size-change', w.actor));
+    // Mutter emits size-change inside the native call; mock.lateSizeChange
+    // delivers it on a later step instead.
+    const sizeChange = () => {
+        const emit = () => global.window_manager.emit('size-change', w.actor);
+        if (mock.lateSizeChange) mock.later.push(emit); else emit();
+    };
     Object.assign(w, {
         get_compositor_private() {return this.unmanaged ? null : this.actor;}, get_id:() => 1,
         get_frame_rect() {return {...this.frame};}, get_buffer_rect() {return {...this.frame};},
         allows_move() {return true;}, allows_resize() {return this.resizable;}, unminimize() {},
-        get_monitor() {const cx = this.frame.x+this.frame.width/2; return cx >= 1000 ? 1 : 0;},
-        get_work_area_for_monitor:m => ({...AREAS[m]}), move_frame() {}, move_to_monitor() {},
+        get_monitor() {const cx = this.frame.x+this.frame.width/2; return cx >= 1000 && mock.monitors > 1 ? 1 : 0;},
+        // Mutter aborts on an index past the monitor count; record it instead.
+        get_work_area_for_monitor:m => {if (m >= mock.monitors) mock.invalidMonitorCalls.push(`work_area(${m})`); return {...AREAS[m]};},
+        move_frame() {}, move_to_monitor(m) {if (m >= mock.monitors) mock.invalidMonitorCalls.push(`move_to_monitor(${m})`);},
         unmake_fullscreen() {this.fullscreen = false; sizeChange();},
-        unmaximize() {this.maximizedHorizontally = this.maximizedVertically = false; sizeChange();},
+        unmaximize() {
+            // Mutter restores the saved floating frame on unmaximize.
+            const apply = () => {
+                this.maximizedHorizontally = this.maximizedVertically = false;
+                if (this.floating) {this.frame = {...this.floating}; this.drawn = {...this.floating};}
+            };
+            sizeChange();
+            // lateUnmaximize: the state change lands that many steps later.
+            if (!mock.lateUnmaximize) {apply(); return;}
+            let left = mock.lateUnmaximize;
+            const tick = () => {if (--left <= 0) apply(); else mock.later.push(tick);};
+            mock.later.push(tick);
+        },
         maximize() {this.maximizedHorizontally = this.maximizedVertically = true;
             this.frame = this.get_work_area_for_monitor(this.get_monitor()); this.drawn = {...this.frame}; sizeChange();},
         move_resize_frame(u, x, y, width, height) {
@@ -118,16 +151,27 @@ function makeWindow({frame = {x:100, y:100, width:600, height:400}, lag = 40, ma
 const e = new Ext();
 e.enable();
 // Waits poll on each step and honour cancellation like the real one.
-e._waitForWindow = (w, p, op) => new Promise((resolve, reject) => {
+const waitFor = (w, p, op) => new Promise((resolve, reject) => {
     let done = false;
+    let stable = 0;
+    // The real wait gives up after 2 s; so does this one (simulated clock).
+    const deadline = mock.clock + 2000000;
     op.cancelWait = () => {if (!done) {done = true; op.cancelWait = null; reject(new Error('Placement cancelled'));}};
     const poll = () => {
         if (done) return;
         if (op.cancelled) {done = true; reject(new Error('Placement cancelled')); return;}
-        if (p()) {done = true; op.cancelWait = null; resolve();} else mock.pending.push(poll);
+        if (mock.clock > deadline) {done = true; reject(new Error('Placement timed out')); return;}
+        // Like the real wait: true on two consecutive checks.
+        if (p()) {
+            if (stable++ >= 1) {done = true; op.cancelWait = null; resolve(); return;}
+        } else {
+            stable = 0;
+        }
+        mock.later.push(poll);
     };
     poll();
 });
+e._waitForWindow = waitFor;
 const flush = async () => {
     for (let i = 0; i < 30; i++) {
         await Promise.resolve();
@@ -142,6 +186,7 @@ const step = async (ms = 4) => {
         win.drawn = win.queue.shift().r;
     for (const t of [...mock.timelines]) t.tick(ms);
     mock.timelines = mock.timelines.filter(t => !t.stopped);
+    mock.later.splice(0).forEach(f => f());
     await flush();
 };
 const settle = async (ms = 1500) => {for (let t = 0; t < ms; t += 4) await step(4);};
@@ -150,13 +195,14 @@ const press = async dir => {
     await flush();
     return p;
 };
-const clean = (w, label) => {
+const clean = (w, label, {busy = true} = {}) => {
     assert(w.actor.scale_x === 1 && w.actor.scale_y === 1 && w.actor.translation_x === 0 && w.actor.translation_y === 0,
         `${label}: actor transform back to identity`);
     assert(!e._visuals.has(w), `${label}: no visual state left`);
     assert(w.actor._h.length === 0, `${label}: no actor signal handlers left`);
     assert(w._h.length === 0, `${label}: no window signal handlers left`);
-    assert(!e._busy.has(w), `${label}: window not busy`);
+    if (busy)
+        assert(!e._busy.has(w), `${label}: window not busy`);
 };
 const fresh = opts => {
     const w = makeWindow(opts);
@@ -294,6 +340,8 @@ const fresh = opts => {
     assert(e._visuals.get(w)?.stopHold, 'hold running');
     w.unmanaged = true;
     w.emit('unmanaging');
+    // The confirmation wait may still be finishing; visuals must be clean now.
+    clean(w, 'closed during hold, immediately', {busy:false});
     await settle(300);
     await p;
     clean(w, 'closed during hold');
@@ -304,6 +352,7 @@ const fresh = opts => {
 {
     const w = fresh({frame:{...AREAS[0]}, maximized:true, fullscreen:true});
     mock.nativeEffects = mock.skippedEffects = 0;
+    mock.lateSizeChange = true;
     const p = press('left');
     await settle(600);
     await p;
@@ -311,6 +360,8 @@ const fresh = opts => {
     assert(mock.nativeEffects === 0, 'no native GNOME size-change effect ran');
     assert(mock.skippedEffects === 2, 'unfullscreen and unmaximize effects both skipped');
     assert(globalThis.global.window_manager._h.length === 1, 'only GNOME\'s own size-change handler remains');
+    assert(!mock.skipped.has(w.actor), 'no effect skip left armed after the placement');
+    mock.lateSizeChange = false;
     clean(w, 'fullscreen');
 }
 
@@ -376,12 +427,211 @@ const fresh = opts => {
     assert(mock.resets.includes(`${wm}:maximize`) && !mock.values.has(`${wm}:maximize`), 'default value restored by reset, not pinned');
     assert(JSON.stringify(mock.values.get(`${ta}:tile-left-half`)) === '["<Super>Left","<Super>KP_4"]', 'customised value written back');
     assert(JSON.stringify(mock.values.get(`${mutter}:toggle-tiled-left`)) === '["<Super>q"]', 'a key the user changed meanwhile is left alone');
+    // Later tests use the main instance again.
+    mock.values.clear(); mock.defaults.clear();
+    e.enable();
+    e._waitForWindow = waitFor;
 }
 
 // 12. Anchors tolerate the 1 px rounding of an interrupted start.
 {
     const a = anchorFor({x:300, y:0, width:701, height:800}, {x:500, y:0, width:500, height:800});
     assert(a.x === 1, 'right edge within 1 px still anchors right');
+}
+// 13. A monitor removed mid-crossing: GNOME's monitors-changed cancels the
+// placement before any call with the stale index (Mutter would abort).
+for (const signal of [true, false]) {
+    const w = fresh({frame:{x:500, y:0, width:500, height:800}});
+    mock.monitors = 2; mock.neighbor = 1; mock.invalidMonitorCalls = [];
+    e._states.set(w, {layout:{x:'right', y:null}, monitor:0, rect:{x:500, y:0, width:500, height:800}, frame:{x:500, y:0, width:500, height:800}});
+    let failed = null;
+    const p = e._snap('right').catch(error => {failed = error;});
+    await flush();
+    await step(4);
+    const idle = makeWindow();
+    e._states.set(idle, {layout:{x:'left', y:null}, monitor:1, rect:{x:1000, y:0, width:500, height:800}, frame:{x:1000, y:0, width:500, height:800}});
+    mock.monitors = 1;
+    if (signal) layout.emit('monitors-changed');
+    if (signal) assert(!e._states.has(idle), 'layouts tied to old monitor indices are forgotten');
+    // Longer than the 2 s wait timeout, so a stuck placement fails instead of hanging.
+    await settle(2500);
+    await p;
+    const label = signal ? 'with monitors-changed' : 'index guard alone';
+    assert(mock.invalidMonitorCalls.length === 0, `${label}: no call with a removed monitor index (${mock.invalidMonitorCalls})`);
+    assert(!failed, `${label}: removal treated as cancellation, not an error`);
+    clean(w, label);
+    mock.monitors = 2;
+}
+
+// 14. Taking bindings with a key missing: every available original is saved
+// before anything changes, and all of them come back on disable.
+{
+    const ta = 'org.gnome.shell.extensions.tiling-assistant';
+    const wm = 'org.gnome.desktop.wm.keybindings';
+    e.disable();
+    mock.values.clear(); mock.defaults.clear(); mock.resets = [];
+    mock.values.set(`${ta}:tile-left-half`, ['<Super>Left']);
+    mock.values.set(`${wm}:maximize`, ['<Super>Up']);
+    mock.missingKeys = new Set([`${ta}:restore-window`]);
+    const f = new Ext();
+    f.enable();
+    assert(mock.bindings.size === 4, 'shortcuts taken despite a missing key');
+    assert(JSON.stringify(mock.values.get(`${ta}:tile-left-half`)) === '[]', 'available keys taken');
+    f.disable();
+    assert(JSON.stringify(mock.values.get(`${ta}:tile-left-half`)) === '["<Super>Left"]', 'key before the missing one restored');
+    assert(JSON.stringify(mock.values.get(`${wm}:maximize`)) === '["<Super>Up"]', 'key after the missing one restored');
+    mock.missingKeys = new Set();
+}
+
+// 15. A schema removed while enabled: disable still restores every other
+// schema, does not throw, and keeps the unrestorable entries for later.
+{
+    const ta = 'org.gnome.shell.extensions.tiling-assistant';
+    const wm = 'org.gnome.desktop.wm.keybindings';
+    mock.values.clear(); mock.defaults.clear();
+    mock.values.set(`${ta}:tile-left-half`, ['<Super>Left']);
+    mock.values.set(`${wm}:maximize`, ['<Super>Up']);
+    const f = new Ext();
+    f.enable();
+    mock.missingSchemas = new Set([ta]);
+    mock.values.set(`${wm}:minimize`, []);
+    mock.missingKeys = new Set([`${wm}:minimize`]);
+    let threw = null;
+    try {f.disable();} catch (error) {threw = error;}
+    assert(!threw, 'disable does not throw when a schema has gone');
+    assert(JSON.stringify(mock.values.get(`${wm}:maximize`)) === '["<Super>Up"]', 'other schemas restored');
+    const kept = JSON.parse(mock.values.get('custom:saved-bindings') || '{}');
+    assert(kept[ta]?.['tile-left-half'] && kept[wm]?.minimize && !kept[wm].maximize,
+        'only unrestorable entries stay saved (missing schema, failing key)');
+    mock.missingSchemas = new Set();
+    mock.missingKeys = new Set();
+    const g = new Ext();
+    g.enable();
+    g.disable();
+    assert(JSON.stringify(mock.values.get(`${ta}:tile-left-half`)) === '["<Super>Left"]', 'restored once the schema is back');
+    assert(!mock.values.get('custom:saved-bindings'), 'nothing left saved');
+    e.enable();
+    e._waitForWindow = waitFor;
+}
+
+// 16. Skips are armed only around native calls: during the animation a
+// close or minimize effect would run normally; none is left afterwards.
+{
+    const w = fresh({frame:{...AREAS[0]}, maximized:true});
+    const p = press('left');
+    let armedWhileAnimating = 0, animatingFrames = 0;
+    for (let i = 0; i < 60; i++) {
+        await step(4);
+        if (w.requests.length) {animatingFrames++; if (mock.skipped.has(w.actor)) armedWhileAnimating++;}
+    }
+    await settle(600);
+    await p;
+    assert(animatingFrames > 5 && armedWhileAnimating === 0, `no skip armed while animating (${armedWhileAnimating}/${animatingFrames})`);
+    assert(!mock.skipped.has(w.actor), 'no skip left afterwards');
+    clean(w, 'skip window');
+}
+
+// 17. A second press while a maximized window is still covered: the window
+// is visible again and the next motion starts where it was seen.
+{
+    const w = fresh({frame:{...AREAS[0]}, maximized:true});
+    w.floating = {x:100, y:100, width:600, height:400};
+    mock.lateUnmaximize = 2;
+    const froms = [];
+    const real = e._animate.bind(e);
+    e._animate = (w_, from, ...rest) => {froms.push({...from}); return real(w_, from, ...rest);};
+    const p1 = press('left');
+    assert(w.actor.opacity === 0, 'cover hides the window while it unmaximizes');
+    // Step until Mutter has restored the floating frame, then press again
+    // while the unmaximize wait is still confirming it.
+    for (let i = 0; i < 10 && w.maximizedHorizontally; i++) await step(4);
+    assert(!w.maximizedHorizontally && w.frame.width === 600, 'floating frame restored under the cover');
+    const p2 = press('down');
+    await settle(800);
+    await Promise.all([p1, p2]);
+    e._animate = real;
+    mock.lateUnmaximize = 0;
+    assert(w.actor.opacity === 255, 'window visible after an interrupted cover');
+    assert(froms.length === 1 && froms[0].x === 0 && froms[0].width === 1000 && froms[0].height === 800,
+        `motion starts from the covered rectangle (${JSON.stringify(froms)})`);
+    assert(w.frame.width === 500 && w.frame.height === 400 && w.frame.y === 400, 'Left, Down from maximized ends bottom-left');
+    clean(w, 'interrupted cover');
+}
+
+// 17b. A mouse grab while covered and before the size change arrives: the
+// unused skip is disarmed and the window is visible again.
+{
+    const w = fresh({frame:{...AREAS[0]}, maximized:true});
+    mock.lateSizeChange = true;
+    mock.lateUnmaximize = 4;
+    const p = press('left');
+    assert(mock.skipped.has(w.actor) && w.actor.opacity === 0, 'skip armed and window covered');
+    mock.grab(null, w);
+    await flush();
+    await p;
+    assert(!mock.skipped.has(w.actor), 'cancelled placement leaves no skip to swallow a close effect');
+    assert(w.actor.opacity === 255, 'cancelled placement leaves the window visible');
+    await settle(100);
+    mock.lateSizeChange = false;
+    mock.lateUnmaximize = 0;
+    clean(w, 'grab while covered');
+}
+
+// 18. A superseded hold's timeline is stopped, not just disconnected.
+{
+    const w = fresh();
+    const p1 = press('up');
+    for (let i = 0; i < 200 && !e._visuals.get(w)?.stopHold; i++) await step(4);
+    const holds = mock.timelines.filter(t => t.duration === 150);
+    assert(holds.length === 1, 'one hold timeline running');
+    const p2 = press('left');
+    for (let i = 0; i < 3; i++) await step(4);
+    assert(holds[0].stopped, 'interrupted hold timeline stopped');
+    await settle(800);
+    await Promise.all([p1, p2]);
+    clean(w, 'stopped hold');
+}
+
+// 19. A press during the relax ease starts from where the window is drawn.
+{
+    const w = fresh({frame:{x:0, y:0, width:500, height:800}, lag:0});
+    w.drawn = {...w.frame};
+    e._states.set(w, {layout:{x:'left', y:null}, monitor:0, rect:{x:0, y:0, width:500, height:800}, frame:{x:0, y:0, width:500, height:800}});
+    e._visuals.set(w, {rect:{x:0, y:0, width:520, height:800}});
+    e._hold(w, w.actor, {x:0, y:0, width:500, height:800}, {anchor:{x:0, y:0}, maxStretch:0.06, growth:{x:1, y:0}});
+    mock.halfEase = true;
+    w.actor.scale_x = 1.04;
+    e._clearVisual(w, true, w.actor);
+    mock.halfEase = false;
+    const displayed = e._displayedRect(w);
+    assert(displayed && displayed.width === 510, 'relax half way is drawn 510 px wide');
+    const froms = [];
+    const real = e._animate.bind(e);
+    e._animate = (w_, from, ...rest) => {froms.push({...from}); return real(w_, from, ...rest);};
+    const p = press('right');
+    await settle(800);
+    await p;
+    e._animate = real;
+    assert(froms[0].width === 510, 'motion starts from the drawn, half-relaxed rectangle');
+    clean(w, 'interrupted relax');
+}
+
+// 20. Exact mapping from a cover fade is not inherited by the next motion.
+{
+    const w = fresh({frame:{...AREAS[0]}, maximized:true});
+    const caps = [];
+    const real = e._showAt.bind(e);
+    let second = false;
+    e._showAt = (w_, actor, r, shape) => {if (second) caps.push(shape.maxStretch); real(w_, actor, r, shape);};
+    const p1 = press('left');
+    for (let i = 0; i < 6; i++) await step(4);
+    second = true;
+    const p2 = press('down');
+    await settle(800);
+    await Promise.all([p1, p2]);
+    e._showAt = real;
+    assert(caps.length > 3 && caps.every(c => c === 0.03), 'an interrupting motion uses the 3% cap from its first frame');
+    clean(w, 'exact mapping scope');
 }
 print(`PASS: ${count} lifecycle assertions`);
 } finally {GLib.unlink(path); GLib.rmdir(folder);}

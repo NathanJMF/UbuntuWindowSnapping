@@ -82,6 +82,9 @@ export default class KeyboardMonitorSnap extends Extension {
             return GLib.SOURCE_CONTINUE;
         });
         this._syncDependency();
+        // Monitor indices change when monitors are added or removed: stop
+        // every placement and forget layouts tied to the old indices.
+        Main.layoutManager.connectObject('monitors-changed', () => this._monitorsChanged(), this);
         // Manual mouse movement/resizing begins a fresh keyboard sequence.
         this._grabId = global.display.connect('grab-op-begin', (_display, window) => {
             this._queued.delete(window);
@@ -89,6 +92,14 @@ export default class KeyboardMonitorSnap extends Extension {
             this._clearVisual(window, false);
             this._states.delete(window);
         });
+    }
+    _monitorsChanged() {
+        this._cancelOperations();
+        this._queued = new WeakMap();
+        this._states = new WeakMap();
+    }
+    _monitorExists(index) {
+        return Number.isInteger(index) && index >= 0 && index < global.display.get_n_monitors();
     }
     _activateBindings() {
         this._takeBindings();
@@ -139,19 +150,40 @@ export default class KeyboardMonitorSnap extends Extension {
             Boolean(dependency.settings?.getGioObject());
     }
     _takeBindings() {
-        // saved-bindings keeps each key's value from before we took it.
+        // saved-bindings keeps each key's value from before we took it. All
+        // originals are stored before any key is changed, so a failure part
+        // way through can always be undone. Missing schemas or keys (e.g.
+        // after a Tiling Assistant update) are skipped.
         let saved = this._settings.get_string('saved-bindings');
         saved = saved ? JSON.parse(saved) : {};
+        const changes = [];
         for (const [schema, keys] of Object.entries(OWNED)) {
-            const settings = new Gio.Settings({schema_id: schema});
-            saved[schema] ??= {};
+            const settings = this._schemaSettings(schema);
+            if (!settings)
+                continue;
             for (const [key, binding] of Object.entries(keys)) {
-                const values = settings.get_strv(key);
+                let values;
+                try {
+                    values = settings.get_strv(key);
+                } catch (error) {
+                    console.warn(`${this.uuid}: ${schema} ${key} unavailable: ${error.message}`);
+                    continue;
+                }
+                saved[schema] ??= {};
                 saved[schema][key] ??= values;
-                settings.set_strv(key, values.filter(v => v !== binding));
+                changes.push(() => settings.set_strv(key, values.filter(v => v !== binding)));
             }
         }
         this._settings.set_string('saved-bindings', JSON.stringify(saved));
+        changes.forEach(change => change());
+    }
+    _schemaSettings(schema) {
+        try {
+            return new Gio.Settings({schema_id: schema});
+        } catch (error) {
+            console.warn(`${this.uuid}: ${error.message}`);
+            return null;
+        }
     }
     _cancelOperations() {
         for (const operation of this._operations?.values() ?? [])
@@ -175,6 +207,7 @@ export default class KeyboardMonitorSnap extends Extension {
             const check = () => {
                 try {
                     if (operation.cancelled || !this._enabled || !this._dependencyReady() ||
+                        (operation.targetMonitor !== undefined && !this._monitorExists(operation.targetMonitor)) ||
                         this._dependency.stateObj._keybindingHandler !== operation.owner ||
                         !window.get_compositor_private()) {
                         finish(new Error('Placement cancelled'));
@@ -208,7 +241,8 @@ export default class KeyboardMonitorSnap extends Extension {
             previousPlacement: operation.previousPlacement,
             // An interrupted animation continues from what is on screen.
             animate: (from, to, apply) => this._animate(window,
-                this._visuals.get(window)?.rect ?? from, to, apply, operation),
+                this._visuals.get(window)?.rect ?? this._displayedRect(window) ?? from, to, apply, operation),
+            monitorExists: index => this._monitorExists(index),
             effects: this._effects(window),
             waitFor: (predicate, stage) => this._waitForWindow(window, predicate, operation, stage),
             clearConstraints: w => {
@@ -268,6 +302,10 @@ export default class KeyboardMonitorSnap extends Extension {
         // A previous hold or relax transition is superseded by this motion.
         this._visuals.get(window)?.stopHold?.();
         actor.remove_all_transitions();
+        // Exact mapping belongs to the cover this motion just faded out; a
+        // later motion must not inherit it.
+        const exactUntil = this._exactUntil.get(window) ?? 0;
+        this._exactUntil.delete(window);
         // Same-size moves give no size commits to time.
         const measurable = from.width !== to.width || from.height !== to.height;
         return new Promise((resolve, reject) => {
@@ -349,7 +387,7 @@ export default class KeyboardMonitorSnap extends Extension {
                 const curve = interpolateRect(from, to, easeOutCubic(elapsed/duration));
                 // While a cover fades, the restored floating frame underneath
                 // is mapped exactly onto the curve; the cap applies afterwards.
-                const exact = now < (this._exactUntil.get(window) ?? 0);
+                const exact = now < exactUntil;
                 this._showAt(window, actor, curve, exact
                     ? {anchor, maxStretch: null, growth: {x: 0, y: 0}} : {anchor, maxStretch, growth});
                 if (this._settings.get_boolean('debug-logging'))
@@ -382,6 +420,21 @@ export default class KeyboardMonitorSnap extends Extension {
         const drawn = {x: actor.x, y: actor.y, width: actor.width, height: actor.height};
         return {buffer: drawn, frame: {x: drawn.x+left, y: drawn.y+top,
             width: drawn.width-left-right, height: drawn.height-top-bottom}};
+    }
+    // Where a window is drawn while a transform is still easing back to
+    // identity (the relax after a hold), or null when it has none.
+    _displayedRect(window) {
+        const actor = window.get_compositor_private();
+        if (!actor || (actor.scale_x === 1 && actor.scale_y === 1 &&
+            actor.translation_x === 0 && actor.translation_y === 0))
+            return null;
+        const {frame, buffer} = this._drawnFrame(window, actor);
+        return {
+            x: Math.round(buffer.x + actor.translation_x + (frame.x-buffer.x)*actor.scale_x),
+            y: Math.round(buffer.y + actor.translation_y + (frame.y-buffer.y)*actor.scale_y),
+            width: Math.round(frame.width*actor.scale_x),
+            height: Math.round(frame.height*actor.scale_y),
+        };
     }
     _sample(map, window, ms) {
         const previous = map.get(window);
@@ -481,23 +534,44 @@ export default class KeyboardMonitorSnap extends Extension {
     _effects(window) {
         const actor = window.get_compositor_private();
         let cover = null;
-        let skipped = false;
         let hidden = false;
-        let rearm = null;
+        // Skips requested and not yet used by a size change. GNOME's handler
+        // (connected first) uses one per change; when several changes are
+        // pending at once, ours re-arms the next. The same skip list also
+        // governs close/minimize effects, so skips are disarmed as soon as
+        // the native change they cover has been confirmed.
+        let pending = 0;
+        let handler = null;
         const enabled = () => actor && this._animationDuration() > 0;
+        const disarm = () => {
+            if (pending > 0)
+                Main.wm._skippedActors?.delete(actor);
+            pending = 0;
+            if (handler !== null)
+                global.window_manager.disconnect(handler);
+            handler = null;
+        };
+        // Mutter emits size-change inside the native call, so skips are
+        // normally used by the time its wait resolves; one still pending
+        // means the change has not arrived yet and stays armed until release.
+        const settle = () => {
+            if (pending === 0)
+                disarm();
+        };
         return {
-            // skipNextEffect covers one size change, but leaving fullscreen
-            // and maximized are two, possibly delivered later. Until release,
-            // re-arm the skip after GNOME's handler (connected first) uses it.
             skip: () => {
                 if (!enabled()) return;
+                pending++;
                 Main.wm.skipNextEffect(actor);
-                skipped = true;
-                rearm ??= global.window_manager.connect('size-change', (_wm, changed) => {
-                    if (changed === actor)
+                handler ??= global.window_manager.connect('size-change', (_wm, changed) => {
+                    if (changed !== actor || pending === 0)
+                        return;
+                    pending--;
+                    if (pending > 0)
                         Main.wm.skipNextEffect(actor);
                 });
             },
+            settle,
             cover: rect => {
                 if (!enabled() || cover) return;
                 let content;
@@ -514,6 +588,11 @@ export default class KeyboardMonitorSnap extends Extension {
                 global.window_group.set_child_above_sibling(cover, actor);
                 actor.opacity = 0;
                 hidden = true;
+                // If this placement is interrupted before it animates, the
+                // next one starts from where the window was seen.
+                const visual = this._visuals.get(window) ?? {};
+                visual.rect ??= {...rect};
+                this._visuals.set(window, visual);
             },
             uncover: () => {
                 if (!cover) return;
@@ -535,12 +614,7 @@ export default class KeyboardMonitorSnap extends Extension {
                     if (hidden)
                         actor.opacity = 255;
                     hidden = false;
-                    // An unused skip would swallow the next unrelated effect.
-                    if (rearm !== null)
-                        global.window_manager.disconnect(rearm);
-                    rearm = null;
-                    if (skipped)
-                        Main.wm._skippedActors?.delete(actor);
+                    disarm();
                 }
             },
         };
@@ -582,6 +656,7 @@ export default class KeyboardMonitorSnap extends Extension {
     }
     async _run(window, directions) {
         this._trace(window, 'before', {directions});
+        const actor = window.get_compositor_private();
         // Mutter can report maximized windows as non-resizable/non-movable.
         // Twm.tile unmaximizes before checking the underlying capabilities.
         const maximized = window.maximizedHorizontally || window.maximizedVertically;
@@ -604,7 +679,11 @@ export default class KeyboardMonitorSnap extends Extension {
             let state = this._states.get(window);
             // An interrupted placement continues from its intended layout,
             // not from the in-between frame the window is currently showing.
-            const superseded = Boolean(state?.superseded);
+            let superseded = Boolean(state?.superseded);
+            if (superseded && !this._monitorExists(state.monitor)) {
+                superseded = false;
+                state = null;
+            }
             let monitor = superseded ? state.monitor : window.get_monitor();
             // A maximization or tile change outside these shortcuts resets the
             // sequence. Pure focus changes preserve each window's sequence.
@@ -627,6 +706,8 @@ export default class KeyboardMonitorSnap extends Extension {
                     crossings.push(result.cross);
                 }
             }
+            if (!this._monitorExists(monitor))
+                throw Object.assign(new Error('Placement cancelled: monitor removed'), {cancelled: true});
             const area = window.get_work_area_for_monitor(monitor);
             const target = rectangle(layout, area);
             this._trace(window, 'decision', {directions, tracked:Boolean(tracked), superseded,
@@ -661,9 +742,9 @@ export default class KeyboardMonitorSnap extends Extension {
             } else {
                 this._states.delete(window);
                 this._queued.delete(window);
-                this._clearVisual(window, true);
+                this._clearVisual(window, true, actor);
             }
-            if (!operation.cancelled) throw error;
+            if (!operation.cancelled && !error.cancelled) throw error;
         } finally {
             if (this._operations.get(window) === operation)
                 this._operations.delete(window);
@@ -676,38 +757,56 @@ export default class KeyboardMonitorSnap extends Extension {
     _releaseBindings() {
         for (const key of this._keys ?? [])
             Main.wm.removeKeybinding(key);
-        if (this._settings) {
-            const raw = this._settings.get_string('saved-bindings');
-            if (raw) {
-                for (const [schema, keys] of Object.entries(JSON.parse(raw)))
-                    this._restoreSchema(schema, keys);
-                this._settings.set_string('saved-bindings', '');
-            }
-        }
         this._keys = [];
         this._active = false;
         this._bindingOwner = null;
+        if (!this._settings)
+            return;
+        const raw = this._settings.get_string('saved-bindings');
+        if (!raw)
+            return;
+        // Entries that cannot be restored now (schema or key missing) stay
+        // saved for a later restore; everything else is restored.
+        const remaining = {};
+        for (const [schema, keys] of Object.entries(JSON.parse(raw))) {
+            const failed = this._restoreSchema(schema, keys);
+            if (Object.keys(failed).length)
+                remaining[schema] = failed;
+        }
+        this._settings.set_string('saved-bindings',
+            Object.keys(remaining).length ? JSON.stringify(remaining) : '');
     }
     // Put back only keys still holding the value we wrote; a key the user
     // changed meanwhile is theirs. A saved value equal to the default is
     // reset rather than written, so it keeps following the system default.
+    // Returns the entries that could not be restored.
     _restoreSchema(schema, keys) {
-        const settings = new Gio.Settings({schema_id: schema});
+        const settings = this._schemaSettings(schema);
+        if (!settings)
+            return keys;
+        const failed = {};
         const same = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
         for (const [key, values] of Object.entries(keys)) {
-            const binding = OWNED[schema]?.[key];
-            const ours = binding ? values.filter(v => v !== binding) : values;
-            if (!same(settings.get_strv(key), ours))
-                continue;
-            const fallback = settings.get_default_value?.(key)?.deepUnpack?.();
-            if (Array.isArray(fallback) && same(fallback, values))
-                settings.reset(key);
-            else
-                settings.set_strv(key, values);
+            try {
+                const binding = OWNED[schema]?.[key];
+                const ours = binding ? values.filter(v => v !== binding) : values;
+                if (!same(settings.get_strv(key), ours))
+                    continue;
+                const fallback = settings.get_default_value?.(key)?.deepUnpack?.();
+                if (Array.isArray(fallback) && same(fallback, values))
+                    settings.reset(key);
+                else
+                    settings.set_strv(key, values);
+            } catch (error) {
+                console.warn(`${this.uuid}: cannot restore ${schema} ${key}: ${error.message}`);
+                failed[key] = values;
+            }
         }
+        return failed;
     }
     disable() {
         this._enabled = false;
+        Main.layoutManager.disconnectObject(this);
         this._cancelOperations();
         for (const window of [...(this._visuals?.keys() ?? [])])
             this._clearVisual(window, false);
@@ -720,9 +819,12 @@ export default class KeyboardMonitorSnap extends Extension {
         if (this._grabId)
             global.display.disconnect(this._grabId);
         this._grabId = null;
-        this._releaseBindings();
-        this._states = new WeakMap();
-        this._queued = new WeakMap();
-        this._dependency = null;
+        try {
+            this._releaseBindings();
+        } finally {
+            this._states = new WeakMap();
+            this._queued = new WeakMap();
+            this._dependency = null;
+        }
     }
 }

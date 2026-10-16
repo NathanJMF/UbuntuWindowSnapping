@@ -245,3 +245,21 @@ Version 14 felt rubbery and stuttery again. Against version 13 at the same 3% ca
 The spread of each window's latency samples is now tracked too. Requests aim at the fast end of the measured lag (mean minus twice the typical deviation), so drawn content rarely gets ahead and the image stretches continuously one way. `FRAME` logs include `latency` and `spread`.
 
 Validation: 357 checks (121 rules, 77 adapter, 79 delayed placement, 80 lifecycle). A client with 20–60 ms jittered lag has content ahead of the curve on under 5% of frames; with the version 14 look-ahead the same client was ahead on 22%.
+
+## Second review fixes (version 16, experiment/animations branch)
+
+A second independent review (of version 15) confirmed the version 14–15 fixes and found:
+
+- **Monitor removed mid-placement.** The target monitor index was used after the unmaximize wait and the animation without checking that it still existed. Mutter aborts on an out-of-range index (`g_assert` in its work-area lookup), which on Wayland ends the session. GNOME's `monitors-changed` now cancels every placement and forgets layouts tied to old indices. Every call that takes a monitor index is also guarded, and waits treat a removed target as a cancellation.
+- **Bindings lost if taking them failed part way.** All original values are now saved before any key changes, and missing schemas or keys (e.g. after a Tiling Assistant update) are skipped.
+- **Restore stopped at the first missing schema.** Each schema and key is restored separately. Entries that cannot be restored stay in `saved-bindings` for a later restore, and `disable()` always finishes its clean-up.
+- **Effect skips armed for the whole placement.** GNOME's skip list also governs close and minimize effects, so closing a window mid-snap made it vanish without its effect. Each native call now gets its own counted skip, released once that change has arrived (Mutter emits it inside the call), with any leftover removed when the placement ends.
+- **Cleanups:**
+  - A press while a maximized window is covered now starts the next motion from where it was seen.
+  - Exact mapping from a cover fade is no longer inherited by a later motion.
+  - A motion that interrupts the relax ease starts from where the window is drawn.
+  - The failure path clears visuals using the known actor.
+
+`tests/lifecycle.test.js` now uses two-check waits with a 2 s timeout, synchronous size-change (with a late variant), monitor removal, missing schemas and keys, and Mutter's restore of the floating frame. Each fix was mutation-checked: removing it makes a test fail. The one exception, leaving the skip handler connected through the animation, makes no behavioural difference because Mutter uses the skip inside the call.
+
+Validation: 431 checks (121 rules, 77 adapter, 79 delayed placement, 154 lifecycle).

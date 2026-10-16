@@ -46,7 +46,7 @@ class Timeline {
  }
 }
 const Clutter={Timeline,AnimationMode:{EASE_OUT_CUBIC:1,EASE_OUT_QUAD:2}};
-const Main={extensionManager:{lookup:()=>({get stateObj(){return mock.dependencyEnabled ? {_twm:Twm,_keybindingHandler:mock.handler,settings:{getGioObject:()=>({})}} : {};}})},wm:{
+const Main={layoutManager:{connectObject(){},disconnectObject(){}},extensionManager:{lookup:()=>({get stateObj(){return mock.dependencyEnabled ? {_twm:Twm,_keybindingHandler:mock.handler,settings:{getGioObject:()=>({})}} : {};}})},wm:{
  skipNextEffect:a=>mock.skipped.push(a),_skippedActors:new Set(),
  addKeybinding:(k,s,f,m,cb)=>mock.bindings.set(k,cb),removeKeybinding:k=>mock.bindings.delete(k)}};
 class Rect {constructor(r){Object.assign(this,r);} equal(r){return ['x','y','width','height'].every(k=>this[k]===r[k]);}}
@@ -59,7 +59,7 @@ const Twm={clearTilingProps:()=>{},updateTileGroup:()=>{},saveTileState:()=>{},i
   w.maximizedHorizontally=full;w.maximizedVertically=full;w.isTiled=!full;w.tiledRect=full?null:r;
  }};
 globalThis.global={window_manager:{connect:()=>1,disconnect(){}},window_group:{add_child(){},set_child_above_sibling(){}},display:{get focus_window(){return mock.focus;},
- get_monitor_neighbor_index:()=>mock.neighbor,connect:(n,cb)=>{mock.grab=cb;return 1;},disconnect:()=>{mock.grab=null;}}};
+ get_monitor_neighbor_index:()=>mock.neighbor,get_n_monitors:()=>2,connect:(n,cb)=>{mock.grab=cb;return 1;},disconnect:()=>{mock.grab=null;}}};
 `;
 const folder = GLib.dir_make_tmp('keyboard-snap-tests-XXXXXX');
 const path = `${folder}/adapter.js`;
