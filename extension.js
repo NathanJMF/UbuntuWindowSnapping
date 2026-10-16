@@ -1,7 +1,9 @@
+import Clutter from 'gi://Clutter';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import Meta from 'gi://Meta';
 import Shell from 'gi://Shell';
+import St from 'gi://St';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 // Preserve Ubuntu mouse-tiling restore information after confirmed placement.
@@ -9,9 +11,12 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {TilingWindowManager as Twm} from 'file:///usr/share/gnome-shell/extensions/tiling-assistant@ubuntu.com/src/extension/tilingWindowManager.js';
 import {Rect} from 'file:///usr/share/gnome-shell/extensions/tiling-assistant@ubuntu.com/src/extension/utility.js';
 import {FULL, step, rectangle} from './engine.js';
-import {placeWindow, sameFrame} from './placement.js';
+import {placeWindow, sameFrame, interpolateRect} from './placement.js';
 
 const UUID = 'tiling-assistant@ubuntu.com';
+const COVER_FADE_MS = 120;
+// Presses made while a window animates run afterwards, in order.
+const MAX_QUEUED = 3;
 const DIRECTIONS = ['left', 'right', 'up', 'down'];
 const NEIGHBOR = {left: Meta.DisplayDirection.LEFT, right: Meta.DisplayDirection.RIGHT,
     up: Meta.DisplayDirection.UP, down: Meta.DisplayDirection.DOWN};
@@ -34,6 +39,7 @@ export default class KeyboardMonitorSnap extends Extension {
         this._keys = [];
         this._states = new WeakMap();
         this._busy = new WeakSet();
+        this._queued = new WeakMap();
         this._traceTimers = new Set();
         this._operations = new Map();
         this._enabled = true;
@@ -48,6 +54,7 @@ export default class KeyboardMonitorSnap extends Extension {
         this._syncDependency();
         // Manual mouse movement/resizing begins a fresh keyboard sequence.
         this._grabId = global.display.connect('grab-op-begin', (_display, window) => {
+            this._queued.delete(window);
             this._operations.get(window)?.cancel();
             this._states.delete(window);
         });
@@ -164,6 +171,8 @@ export default class KeyboardMonitorSnap extends Extension {
         const applied = await placeWindow(window, target, monitor, {
             both: Meta.MaximizeFlags.BOTH,
             previousPlacement: operation.previousPlacement,
+            animate: (from, to, apply) => this._animate(window, from, to, apply, operation),
+            effects: this._effects(window),
             waitFor: (predicate, stage) => this._waitForWindow(window, predicate, operation, stage),
             clearConstraints: w => {
                 if (w.override_constraints) {
@@ -193,6 +202,114 @@ export default class KeyboardMonitorSnap extends Extension {
         Twm.saveTileState(window);
         return applied;
     }
+    _animationDuration() {
+        const st = St.Settings.get();
+        if (!st.enable_animations)
+            return 0;
+        return Math.round(this._settings.get_int('animation-duration') * st.slow_down_factor);
+    }
+    // Resize the real frame on every compositor frame so the application
+    // redraws continuously. A request is sent only when the client has
+    // acknowledged the previous size, or after a short timeout, so slow
+    // clients are not flooded; the final target is always sent afterwards.
+    _animate(window, from, to, apply, operation) {
+        const duration = this._animationDuration();
+        const actor = window.get_compositor_private();
+        if (!duration || !actor)
+            return Promise.resolve();
+        this._trace(window, 'animate', {from, to, duration});
+        return new Promise((resolve, reject) => {
+            const timeline = new Clutter.Timeline({actor, duration,
+                progress_mode: Clutter.AnimationMode.EASE_OUT_CUBIC});
+            let requested = null;
+            let sentAt = 0;
+            let finished = false;
+            const finish = error => {
+                if (finished) return;
+                finished = true;
+                operation.cancelAnimation = null;
+                timeline.disconnectObject(this);
+                actor.disconnectObject(timeline);
+                timeline.stop();
+                error ? reject(error) : resolve();
+            };
+            operation.cancelAnimation = () => finish(new Error('Placement cancelled'));
+            timeline.connectObject('new-frame', () => {
+                const frame = window.get_frame_rect();
+                const now = GLib.get_monotonic_time();
+                const acknowledged = !requested ||
+                    (Math.abs(frame.width-requested.width) <= 3 && Math.abs(frame.height-requested.height) <= 3);
+                if (!acknowledged && now-sentAt < 50000)
+                    return;
+                const rect = interpolateRect(from, to, timeline.get_progress());
+                if (requested && sameFrame(rect, requested, 0))
+                    return;
+                requested = rect;
+                sentAt = now;
+                apply(rect);
+            }, 'completed', () => finish(), this);
+            actor.connectObject('destroy', () => finish(new Error('Placement cancelled')), timeline);
+            timeline.start();
+        });
+    }
+    // Native maximize/unmaximize transitions are replaced: GNOME's zoom
+    // effect is skipped, and a snapshot covers the frame jump while Mutter
+    // leaves the maximized state, then fades out as the animation begins.
+    _effects(window) {
+        const actor = window.get_compositor_private();
+        let cover = null;
+        let skipped = false;
+        let hidden = false;
+        const enabled = () => actor && this._animationDuration() > 0;
+        return {
+            skip: () => {
+                if (!enabled()) return;
+                Main.wm.skipNextEffect(actor);
+                skipped = true;
+            },
+            cover: rect => {
+                if (!enabled() || cover) return;
+                let content;
+                try {
+                    content = actor.paint_to_content(window.get_frame_rect());
+                } catch (error) {
+                    // No texture yet (e.g. just mapped): animate without a cover.
+                    return;
+                }
+                cover = new St.Widget({content});
+                cover.set_position(rect.x, rect.y);
+                cover.set_size(rect.width, rect.height);
+                global.window_group.add_child(cover);
+                global.window_group.set_child_above_sibling(cover, actor);
+                actor.opacity = 0;
+                hidden = true;
+            },
+            uncover: () => {
+                if (!cover) return;
+                const fading = cover;
+                cover = null;
+                actor.opacity = 255;
+                hidden = false;
+                fading.ease({opacity: 0, duration: COVER_FADE_MS,
+                    mode: Clutter.AnimationMode.EASE_OUT_QUAD,
+                    onStopped: () => fading.destroy()});
+            },
+            release: () => {
+                if (cover) {
+                    cover.destroy();
+                    cover = null;
+                }
+                if (actor) {
+                    if (hidden)
+                        actor.opacity = 255;
+                    hidden = false;
+                    // An unused skip would swallow the next unrelated effect.
+                    if (skipped)
+                        Main.wm._skippedActors?.delete(actor);
+                }
+            },
+        };
+    }
     _trace(window, phase, extra = {}) {
         if (!this._settings?.get_boolean('debug-logging'))
             return;
@@ -213,12 +330,16 @@ export default class KeyboardMonitorSnap extends Extension {
             console.log(`${this.uuid}: TRACE sample unavailable: ${error.message}`);
         }
     }
-    async _snap(direction) {
-        if (!this._dependencyReady())
+    async _snap(direction, window = global.display.focus_window) {
+        if (!this._dependencyReady() || !window)
             return;
-        const window = global.display.focus_window;
-        if (!window || this._busy.has(window))
+        if (this._busy.has(window)) {
+            const queue = this._queued.get(window) ?? [];
+            if (queue.length < MAX_QUEUED)
+                queue.push(direction);
+            this._queued.set(window, queue);
             return;
+        }
         this._trace(window, 'before', {direction});
         // Mutter can report maximized windows as non-resizable/non-movable.
         // Twm.tile unmaximizes before checking the underlying capabilities.
@@ -229,7 +350,7 @@ export default class KeyboardMonitorSnap extends Extension {
         }
         this._busy.add(window);
         const operation = {owner:this._dependency.stateObj._keybindingHandler, cancelled:false,
-            cancel() {this.cancelled=true; this.cancelWait?.();}};
+            cancel() {this.cancelled=true; this.cancelWait?.(); this.cancelAnimation?.();}};
         this._operations.set(window, operation);
         try {
             let monitor = window.get_monitor();
@@ -272,12 +393,16 @@ export default class KeyboardMonitorSnap extends Extension {
             }
         } catch (error) {
             this._states.delete(window);
+            this._queued.delete(window);
             if (!operation.cancelled) throw error;
         } finally {
             if (this._operations.get(window) === operation)
                 this._operations.delete(window);
             this._busy.delete(window);
         }
+        const next = this._queued.get(window)?.shift();
+        if (next && this._enabled)
+            await this._snap(next, window);
     }
     _releaseBindings() {
         for (const key of this._keys ?? [])
@@ -311,6 +436,7 @@ export default class KeyboardMonitorSnap extends Extension {
         this._grabId = null;
         this._releaseBindings();
         this._states = new WeakMap();
+        this._queued = new WeakMap();
         this._dependency = null;
     }
 }

@@ -54,7 +54,7 @@ gjs -m tests/placement.test.js
 glib-compile-schemas --strict schemas
 ```
 
-The pure engine and adapter mock tests pass (195 assertions total). Live keyboard behaviour must be verified after GNOME loads the extension at login; unit tests cannot establish Mutter's actual resizing behaviour.
+The pure engine and adapter mock tests pass (223 assertions total). Live keyboard behaviour must be verified after GNOME loads the extension at login; unit tests cannot establish Mutter's actual resizing behaviour.
 
 ## Disable / rollback
 
@@ -129,3 +129,19 @@ Version 5 validation: 177 checks (113 rules, 32 adapter, 32 delayed placement); 
 Crossing Right arrives on the destination's left half; Left arrives on its right half; Down on its top half; Up on its bottom half. Entry halves remain tracked, so existing opposite-half intermediate steps and perpendicular quarter combinations apply immediately. Outward quarters still expand to a full side before crossing. Native geometry placement/confirmation is unchanged, and the monitor-arrival half is applied without a native maximize request.
 
 Version 6 validation: 195 checks (121 rules, 32 adapter, 42 delayed placement).
+
+## Custom keyboard animations (version 7)
+
+Keyboard snaps no longer use GNOME's size-change effect, which stretched a snapshot and redrew the app only at the end. The real window frame is now resized on every compositor frame (250 ms, ease-out cubic), so applications reflow continuously while they move and resize, including across monitors. A new size is requested only after the client acknowledges the previous one (or 50 ms passes), so slow clients are not flooded; the exact target is always confirmed afterwards as before.
+
+- Leaving a maximized window: a snapshot covers the frame jump while Mutter unmaximizes, then fades out (120 ms) as the live animation starts.
+- Ending full: the frame grows to the work area first, then native maximize is issued with GNOME's zoom effect skipped.
+- Animated crossings do not issue a late `move_to_monitor`, which would briefly re-place the window relative to the source monitor.
+- Presses during an animation are queued (up to three) and run in order instead of being dropped.
+- Length: `animation-duration` setting (0 disables). GNOME's global animation switch and slow-down factor are respected. Mouse snapping and Tiling Assistant animations are unchanged.
+
+```bash
+GSETTINGS_SCHEMA_DIR="$PWD/schemas" gsettings set org.gnome.shell.extensions.keyboard-monitor-snap animation-duration 250
+```
+
+Version 7 validation: 223 checks (121 rules, 42 adapter, 60 delayed placement). Live smoothness depends on each application's resize speed and must be checked after logging in.

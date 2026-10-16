@@ -5,7 +5,19 @@ export function sameFrame(a, b, tolerance = 3) {
 export function frameCopy(r) {
     return {x:r.x, y:r.y, width:r.width, height:r.height};
 }
-export async function placeWindow(window, target, monitor, {waitFor, both, constrain, clearConstraints, acceptedFrame = null, previousPlacement = null}) {
+function centeredIn(frame, area) {
+    const cx = frame.x + frame.width/2, cy = frame.y + frame.height/2;
+    return cx >= area.x && cx < area.x+area.width && cy >= area.y && cy < area.y+area.height;
+}
+// Eased intermediate frame between two rectangles (t from 0 to 1).
+export function interpolateRect(from, to, t) {
+    const at = k => Math.round(from[k] + (to[k]-from[k]) * t);
+    return {x:at('x'), y:at('y'), width:at('width'), height:at('height')};
+}
+// animate(from, to, apply) drives real frame changes so the client redraws
+// at every intermediate size. effects hides native maximize transitions.
+export async function placeWindow(window, target, monitor, {waitFor, both, constrain, clearConstraints,
+    acceptedFrame = null, previousPlacement = null, animate = null, effects = null}) {
     const full = sameFrame(target, window.get_work_area_for_monitor(monitor), 0);
     // acceptedFrame must come from a prior confirmed placement of this same
     // target; it cannot be inferred from an arbitrary oversized current frame.
@@ -14,6 +26,22 @@ export async function placeWindow(window, target, monitor, {waitFor, both, const
         (full ? window.maximizedHorizontally && window.maximizedVertically
               : !window.maximizedHorizontally && !window.maximizedVertically))
         return {frame:frameCopy(window.get_frame_rect()), full};
+    try {
+        return await placeStages(window, target, monitor, full,
+            {waitFor, both, constrain, clearConstraints, previousPlacement, animate, effects});
+    } finally {
+        effects?.release();
+    }
+}
+async function placeStages(window, target, monitor, full, {waitFor, both, constrain, clearConstraints,
+    previousPlacement, animate, effects}) {
+    // Where the window visibly is now; the animation starts here even if
+    // unmaximizing restores an older floating frame underneath the cover.
+    const start = frameCopy(window.get_frame_rect());
+    if (window.fullscreen || window.maximizedHorizontally || window.maximizedVertically) {
+        effects?.cover(start);
+        effects?.skip();
+    }
     if (window.fullscreen)
         window.unmake_fullscreen();
     window.unminimize();
@@ -33,8 +61,7 @@ export async function placeWindow(window, target, monitor, {waitFor, both, const
     // Absolute geometry must be sent before waiting for destination identity:
     // some compositors assign the monitor only when that geometry commits.
     clearConstraints?.(window);
-    if (window.get_monitor() !== monitor)
-        window.move_to_monitor(monitor);
+    let animated = false;
     // Reuse a size only when this window already confirmed it for the same
     // requested dimensions on the same monitor. This supports opposite-side
     // movement of minimum-size apps without guessing whether a resize landed.
@@ -44,7 +71,18 @@ export async function placeWindow(window, target, monitor, {waitFor, both, const
         target.height === previousPlacement.target.height;
     const appliedTarget = knownSize
         ? {...target, width:before.width, height:before.height} : target;
-    if (window.get_monitor() !== monitor || !sameFrame(before, appliedTarget)) {
+    effects?.uncover();
+    if (animate && !sameFrame(start, appliedTarget, 0)) {
+        await animate(start, appliedTarget, rect =>
+            window.move_resize_frame(true, rect.x, rect.y, rect.width, rect.height));
+        animated = true;
+    }
+    // After an animated crossing the frame already sits on the destination;
+    // a late move_to_monitor would briefly re-place it relative to the source.
+    if (window.get_monitor() !== monitor && !(animated && centeredIn(window.get_frame_rect(),
+        window.get_work_area_for_monitor(monitor))))
+        window.move_to_monitor(monitor);
+    if (window.get_monitor() !== monitor || !sameFrame(window.get_frame_rect(), appliedTarget)) {
         window.move_frame(true, appliedTarget.x, appliedTarget.y);
         window.move_resize_frame(true, appliedTarget.x, appliedTarget.y, appliedTarget.width, appliedTarget.height);
     }
@@ -68,6 +106,8 @@ export async function placeWindow(window, target, monitor, {waitFor, both, const
     constrain?.(window, target, monitor);
     if (full) {
         // Never issue maximize while a move_to_monitor is still pending.
+        // The frame already fills the work area, so skip GNOME's zoom effect.
+        effects?.skip();
         if (window.maximize.length === 0)
             window.maximize();
         else

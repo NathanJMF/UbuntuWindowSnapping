@@ -4,6 +4,11 @@
     <key name="snap-right" type="as"><default>['&lt;Super&gt;Right']</default></key>
     <key name="snap-up" type="as"><default>['&lt;Super&gt;Up']</default></key>
     <key name="snap-down" type="as"><default>['&lt;Super&gt;Down']</default></key>
+    <key name="animation-duration" type="i">
+      <range min="0" max="1000"/>
+      <default>250</default>
+      <summary>Keyboard snap animation length in milliseconds (0 disables)</summary>
+    </key>
     <key name="debug-logging" type="b"><default>false</default></key>
     <key name="saved-bindings" type="s"><default>''</default></key>
   </schema>

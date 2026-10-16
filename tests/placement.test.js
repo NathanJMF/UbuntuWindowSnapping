@@ -1,4 +1,4 @@
-import {placeWindow,sameFrame} from '../placement.js';
+import {placeWindow,sameFrame,interpolateRect} from '../placement.js';
 let assertions=0;
 function assert(value,message){assertions++;if(!value)throw new Error(message);}
 function environment({monitor=2,minWidth=0,cancelAt=Infinity,resizeDelay=4,geometryAssignsMonitor=false}={}) {
@@ -19,7 +19,7 @@ function environment({monitor=2,minWidth=0,cancelAt=Infinity,resizeDelay=4,geome
   move_frame(user,x,y){schedule(2,()=>{this.frame.x=x;this.frame.y=y;});},
   move_resize_frame(user,x,y,width,height){
    assert(!this.maximizedHorizontally&&!this.maximizedVertically,'half placement has no native maximize hints');
-   e.events.push('resize-request');schedule(resizeDelay,()=>{this.frame={x,y,width:Math.max(minWidth,width),height};if(geometryAssignsMonitor&&e.requestedMonitor!==undefined){this.monitor=e.requestedMonitor;e.events.push('move-acked');}e.events.push('resize-acked');});
+   e.events.push('resize-request');schedule(resizeDelay,()=>{this.frame={x,y,width:Math.max(minWidth,width),height};if(geometryAssignsMonitor){const cx=x+width/2,cy=y+height/2;const m=areas.findIndex(a=>cx>=a.x&&cx<a.x+a.width&&cy>=a.y&&cy<a.y+a.height);if(m!==-1&&m!==this.monitor){this.monitor=m;e.events.push('move-acked');}}e.events.push('resize-acked');});
   },
   maximize(){
    e.events.push('maximize-request');schedule(3,()=>{this.maximizedHorizontally=true;this.maximizedVertically=true;this.frame={...areas[this.monitor]};e.events.push('maximize-acked');});
@@ -101,5 +101,41 @@ for (const [source,dest,target] of [
  assert(w.monitor===dest&&sameFrame(result.frame,target),'cross-monitor half lands on the requested destination edge');
  assert(!result.full&&!w.maximizedHorizontally&&!w.maximizedVertically,'cross-monitor half does not maximize');
  assert(!e.events.includes('maximize-request'),'half arrival issues no native maximize request');
+}
+{
+ const r=interpolateRect({x:0,y:0,width:100,height:50},{x:100,y:10,width:50,height:50},0.5);
+ assert(r.x===50&&r.y===5&&r.width===75&&r.height===50,'interpolated midpoint frame');
+}
+function effectsLog(log){return {cover:()=>log.push('cover'),skip:()=>log.push('skip'),uncover:()=>log.push('uncover'),release:()=>log.push('release')};}
+// Animation waits for each intermediate frame like a live client would.
+function animator(e,w,waitFor,log){return async(from,to,apply)=>{
+ log.push('animate');
+ for(const t of [0.3,0.7,1]){const r=interpolateRect(from,to,t);apply(r);await waitFor(()=>sameFrame(w.get_frame_rect(),r,0));}
+};}
+{
+ const {e,w,waitFor,areas}=environment({monitor:0});
+ const log=[];const target={x:1080,y:249,width:1280,height:1355};
+ const r=await placeWindow(w,target,0,{waitFor,both:3,effects:effectsLog(log),animate:animator(e,w,waitFor,log)});
+ assert(sameFrame(r.frame,target)&&!r.full,'animated maximized -> left half lands exactly');
+ assert(log.join(',')==='cover,skip,uncover,animate,release','cover before unmaximize, released after');
+ const widths=e.events.filter(x=>x==='resize-request').length;
+ assert(widths===3,'intermediate frames requested; landed target is not re-sent');
+}
+{
+ const {e,w,waitFor,areas}=environment({monitor:0});
+ w.maximizedHorizontally=false;w.maximizedVertically=false;w.frame={x:1080,y:249,width:1280,height:1355};
+ const log=[];
+ const r=await placeWindow(w,areas[0],0,{waitFor,both:3,effects:effectsLog(log),animate:animator(e,w,waitFor,log)});
+ assert(r.full&&w.maximizedHorizontally,'animated half -> full maximizes at the end');
+ assert(log.join(',')==='uncover,animate,skip,release','half -> full needs no cover; maximize effect skipped');
+ assert(e.events.lastIndexOf('resize-acked')<e.events.indexOf('maximize-request'),'maximize only after animated frame fills work area');
+}
+{
+ const {e,w,waitFor,areas}=environment({monitor:0,geometryAssignsMonitor:true});
+ w.maximizedHorizontally=false;w.maximizedVertically=false;w.frame={x:1080,y:249,width:1280,height:1355};
+ const target={x:0,y:32,width:540,height:1835};const log=[];
+ const r=await placeWindow(w,target,2,{waitFor,both:3,effects:effectsLog(log),animate:animator(e,w,waitFor,log)});
+ assert(w.monitor===2&&sameFrame(r.frame,target),'animated crossing lands on destination half');
+ assert(!e.events.includes('move-request'),'animated crossing sends no late move_to_monitor jump');
 }
 print(`PASS: ${assertions} delayed placement assertions`);
