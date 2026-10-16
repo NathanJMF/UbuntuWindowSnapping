@@ -6,7 +6,7 @@
     <key name="snap-down" type="as"><default>['&lt;Super&gt;Down']</default></key>
     <key name="animation-duration" type="i">
       <range min="0" max="1000"/>
-      <default>170</default>
+      <default>120</default>
       <summary>Keyboard snap animation length in milliseconds (0 disables)</summary>
     </key>
     <key name="debug-logging" type="b"><default>false</default></key>
