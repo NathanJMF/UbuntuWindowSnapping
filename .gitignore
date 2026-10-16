@@ -1,0 +1,7 @@
+schemas/gschemas.compiled
+*.zip
+*.log
+*.backup*
+__pycache__/
+*.token
+.env

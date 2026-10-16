@@ -1,0 +1,10 @@
+<schemalist>
+  <schema id="org.gnome.shell.extensions.keyboard-monitor-snap" path="/org/gnome/shell/extensions/keyboard-monitor-snap/">
+    <key name="snap-left" type="as"><default>['&lt;Super&gt;Left']</default></key>
+    <key name="snap-right" type="as"><default>['&lt;Super&gt;Right']</default></key>
+    <key name="snap-up" type="as"><default>['&lt;Super&gt;Up']</default></key>
+    <key name="snap-down" type="as"><default>['&lt;Super&gt;Down']</default></key>
+    <key name="debug-logging" type="b"><default>false</default></key>
+    <key name="saved-bindings" type="s"><default>''</default></key>
+  </schema>
+</schemalist>

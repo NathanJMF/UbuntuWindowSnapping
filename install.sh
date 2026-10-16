@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -euo pipefail
+base=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+uuid=keyboard-monitor-snap@local
+dest="$HOME/.local/share/gnome-shell/extensions/$uuid"
+gjs -m "$base/tests/rules.test.js"
+gjs -m "$base/tests/adapter.test.js"
+gjs -m "$base/tests/placement.test.js"
+glib-compile-schemas --strict "$base/schemas"
+mkdir -p "$dest/schemas"
+cp "$base/metadata.json" "$base/extension.js" "$base/engine.js" "$base/placement.js" "$dest/"
+cp "$base/schemas/"* "$dest/schemas/"
+# The old experimental patch must never be active alongside this extension.
+gnome-extensions disable windows-monitor-snap@local 2>/dev/null || true
+python3 - <<'PY'
+from gi.repository import Gio
+s=Gio.Settings.new('org.gnome.shell')
+a=[v for v in s.get_strv('enabled-extensions') if v!='windows-monitor-snap@local']
+u='keyboard-monitor-snap@local'
+if u not in a: a.append(u)
+s.set_strv('enabled-extensions',a)
+Gio.Settings.sync()
+PY
+gsettings set org.gnome.shell.extensions.tiling-assistant enable-tiling-popup false
+if gnome-extensions info "$uuid" >/dev/null 2>&1; then
+ gnome-extensions enable "$uuid"
+ gnome-extensions info "$uuid"
+else
+ echo 'Installed and enabled for next login. Save your work, then log out and back in.'
+fi

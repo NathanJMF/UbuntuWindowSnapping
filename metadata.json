@@ -1,0 +1,10 @@
+{
+  "uuid": "keyboard-monitor-snap@local",
+  "name": "Keyboard Snapping",
+  "description": "Half and quarter snapping with monitor-aware Super+Arrow movement. Mouse snapping is unchanged. Requires Ubuntu Tiling Assistant.",
+  "shell-version": [
+    "50"
+  ],
+  "settings-schema": "org.gnome.shell.extensions.keyboard-monitor-snap",
+  "version": 2
+}
