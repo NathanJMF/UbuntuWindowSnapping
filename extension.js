@@ -15,6 +15,7 @@ import {placeWindow, sameFrame, interpolateRect, travelDuration, visualTransform
     easeOutCubic, anchorFor} from './placement.js';
 
 const UUID = 'tiling-assistant@ubuntu.com';
+const rect = r => ({x: r.x, y: r.y, width: r.width, height: r.height});
 const COVER_FADE_MS = 120;
 // Confirmation checks run about once per frame, starting immediately, so a
 // state that is already true settles in one frame instead of two 25 ms polls.
@@ -251,7 +252,8 @@ export default class KeyboardMonitorSnap extends Extension {
         const anchor = anchorFor(from, to);
         const maxStretch = this._maxStretch();
         const lead = Math.min(MAX_LEAD_MS, this._latency.get(window) ?? DEFAULT_LEAD_MS);
-        this._trace(window, 'animate', {from, to, duration, lead, maxStretch});
+        this._trace(window, 'animate', {from, to, duration, lead, maxStretch,
+            client: window.get_client_type?.() === Meta.WindowClientType.X11 ? 'x11' : 'wayland'});
         // A previous hold or relax transition is superseded by this motion.
         this._visuals.get(window)?.hold?.stop();
         actor.remove_all_transitions();
@@ -280,7 +282,9 @@ export default class KeyboardMonitorSnap extends Extension {
             operation.cancelAnimation = () => finish(new Error('Placement cancelled'));
             timeline.connectObject('new-frame', () => {
                 const elapsed = timeline.get_elapsed_time();
-                const frame = window.get_frame_rect();
+                // What is on screen, not Mutter's frame rect: that can change
+                // as soon as a size is requested, long before the client draws it.
+                const frame = this._drawnFrame(window, actor).frame;
                 const now = GLib.get_monotonic_time();
                 // The newest request this frame matches has committed; its age
                 // is one latency sample. Older requests were skipped by the client.
@@ -301,12 +305,31 @@ export default class KeyboardMonitorSnap extends Extension {
                     sent.push({rect: ahead, at: now});
                     apply(ahead);
                 }
-                this._showAt(window, actor, interpolateRect(from, to, easeOutCubic(elapsed/duration)),
-                    anchor, maxStretch);
+                const curve = interpolateRect(from, to, easeOutCubic(elapsed/duration));
+                this._showAt(window, actor, curve, anchor, maxStretch);
+                if (this._settings.get_boolean('debug-logging'))
+                    console.log(`${this.uuid}: FRAME ${JSON.stringify({id:window.get_id(), elapsed,
+                        curve, drawn:frame, mutter:rect(window.get_frame_rect()), requested:sent.at(-1)?.rect ?? null,
+                        scale:[actor.scale_x, actor.scale_y].map(v => Math.round(v*1000)/1000)})}`);
             }, 'completed', () => finish(), this);
             actor.connectObject('destroy', () => finish(new Error('Placement cancelled')), timeline);
             timeline.start();
         });
+    }
+    // The window frame as currently drawn: the actor's own geometry (synced
+    // only when the client's new buffer is shown) minus Mutter's current
+    // shadow/border margins. Falls back to Mutter's rects before first paint.
+    _drawnFrame(window, actor) {
+        const frame = window.get_frame_rect();
+        const buffer = window.get_buffer_rect();
+        if (!(actor.width > 0 && actor.height > 0))
+            return {frame: rect(frame), buffer: rect(buffer)};
+        const left = frame.x-buffer.x, top = frame.y-buffer.y;
+        const right = buffer.x+buffer.width-frame.x-frame.width;
+        const bottom = buffer.y+buffer.height-frame.y-frame.height;
+        const drawn = {x: actor.x, y: actor.y, width: actor.width, height: actor.height};
+        return {buffer: drawn, frame: {x: drawn.x+left, y: drawn.y+top,
+            width: drawn.width-left-right, height: drawn.height-top-bottom}};
     }
     _sampleLatency(window, ms) {
         const previous = this._latency.get(window);
@@ -315,7 +338,8 @@ export default class KeyboardMonitorSnap extends Extension {
     // Draw the window actor so its current real frame appears at `rect`,
     // within the stretch cap. Remembers what was actually drawn.
     _showAt(window, actor, rect, anchor = {x:0, y:0}, maxStretch = null) {
-        const t = visualTransform(window.get_frame_rect(), window.get_buffer_rect(), rect, {maxStretch, anchor});
+        const drawn = this._drawnFrame(window, actor);
+        const t = visualTransform(drawn.frame, drawn.buffer, rect, {maxStretch, anchor});
         actor.set_pivot_point(0, 0);
         actor.scale_x = t.scale_x;
         actor.scale_y = t.scale_y;
@@ -343,7 +367,7 @@ export default class KeyboardMonitorSnap extends Extension {
             this._clearVisual(window, !caughtUp);
         };
         hold.connectObject('new-frame', () => {
-            if (sameFrame(window.get_frame_rect(), target, 1))
+            if (sameFrame(this._drawnFrame(window, actor).frame, target, 1))
                 end(true);
             else
                 this._showAt(window, actor, target, anchor, maxStretch);
@@ -432,14 +456,14 @@ export default class KeyboardMonitorSnap extends Extension {
         try {
             const state = this._states.get(window);
             const frame = window.get_frame_rect();
-            const rect = r => r ? {x:r.x, y:r.y, width:r.width, height:r.height} : null;
+            const maybeRect = r => r ? rect(r) : null;
             console.log(`${this.uuid}: TRACE ${JSON.stringify({
                 phase, app:window.get_wm_class(), id:window.get_id(),
                 monitor:window.get_monitor(), priorMonitor:state?.monitor,
                 priorLayout:state?.layout, nativeMaxH:window.maximizedHorizontally,
                 nativeMaxV:window.maximizedVertically, canMove:window.allows_move(),
                 canResize:window.allows_resize(), isTiled:window.isTiled,
-                tiledRect:rect(window.tiledRect), frame:rect(frame), ...extra,
+                tiledRect:maybeRect(window.tiledRect), frame:maybeRect(frame), ...extra,
             })}`);
         } catch (error) {
             // A window can close before the delayed diagnostic sample.

@@ -180,3 +180,17 @@ GSETTINGS_SCHEMA_DIR="$PWD/schemas" gsettings set org.gnome.shell.extensions.key
 - Debug traces include the lead and cap used for each animation.
 
 Validation: 259 checks (121 rules, 63 adapter, 75 delayed placement).
+
+## Drawn-geometry correction (version 11, experiment/animations branch)
+
+Version 10 still looked rubbery: traces showed "commits" 2–22 ms after each request for ChatGPT (X11), Chromium and Claude (Wayland), so Mutter's frame rect was changing long before the client had drawn the new size. The image transform and the latency measurement were therefore based on a size the screen did not yet show, scaling the wrong amount on some frames, and the request lead stayed near zero.
+
+The drawn frame is now taken from the window actor's own geometry, which Mutter syncs when the client's new buffer is shown, minus the current shadow/border margins. It drives the image transform, commit/latency detection, and the post-motion hold.
+
+With debug logging on, every animation frame logs a `FRAME` line (curve rectangle, drawn frame, Mutter frame, last request, scale), and `animate` traces record the client type:
+
+```bash
+journalctl -b _COMM=gnome-shell --no-pager --since "-5min" -o cat --grep 'keyboard-monitor-snap@local: (FRAME|TRACE)'
+```
+
+Validation: 263 checks (121 rules, 67 adapter, 75 delayed placement), including an X11-style client whose frame rect runs ahead of its drawn buffer (fails on version 10).

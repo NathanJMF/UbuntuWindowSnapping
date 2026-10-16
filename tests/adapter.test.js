@@ -20,7 +20,7 @@ const GLib={PRIORITY_DEFAULT:0,SOURCE_CONTINUE:true,get_monotonic_time:(()=>{let
  timeout_add:(p,ms,cb)=>{const id=mock.timers.size+1;mock.timers.set(id,cb);return id;},
  Source:{remove:id=>mock.timers.delete(id)}};
 class Extension {getSettings(){return new Settings();}}
-const Meta={DisplayDirection:{LEFT:0,RIGHT:1,UP:2,DOWN:3},KeyBindingFlags:{IGNORE_AUTOREPEAT:1},MaximizeFlags:{BOTH:3}};
+const Meta={WindowClientType:{WAYLAND:0,X11:1},DisplayDirection:{LEFT:0,RIGHT:1,UP:2,DOWN:3},KeyBindingFlags:{IGNORE_AUTOREPEAT:1},MaximizeFlags:{BOTH:3}};
 const Shell={ActionMode:{NORMAL:1}};
 const St={Settings:{get:()=>({enable_animations:mock.animations,slow_down_factor:1})},
  Widget:class{constructor(){mock.covers++;} set_position(){} set_size(){} ease({onStopped}){onStopped?.();} destroy(){}}};
@@ -69,7 +69,7 @@ const local = text.match(/^import [^;]* from '\.\/[^']*';$/gm).map(line =>
 GLib.file_set_contents(path, local + '\n' + setup + text.replace(/^import [^;]*;\n/gm,''));
 let count=0;
 function assert(v,msg){count++;if(!v)throw new Error(msg);}
-function window(maximized=false){return {monitor:0,maximizedHorizontally:maximized,maximizedVertically:maximized,
+function window(maximized=false){const w={monitor:0,maximizedHorizontally:maximized,maximizedVertically:maximized,
  frame:{x:0,y:0,width:1000,height:800},
  actor:{opacity:255,scale_x:1,scale_y:1,translation_x:0,translation_y:0,
   connectObject(){},disconnectObject(){},paint_to_content:()=>({}),set_pivot_point(){},remove_all_transitions(){},
@@ -82,7 +82,9 @@ function window(maximized=false){return {monitor:0,maximizedHorizontally:maximiz
  maximize(){this.maximizedHorizontally=true;this.maximizedVertically=true;this.frame=this.get_work_area_for_monitor(this.monitor);},
  move_to_monitor(m){this.monitor=m;},move_frame(u,x,y){this.frame.x=x;this.frame.y=y;},
  move_resize_frame(u,x,y,width,height){this.frame={x,y,width,height};this.frames?.push({x,y,width,height});this.recordPlacement(this);},
- get_monitor(){return this.monitor;},get_work_area_for_monitor(m){return {x:m*1000,y:0,width:1000,height:800};}};}
+ get_monitor(){return this.monitor;},get_work_area_for_monitor(m){return {x:m*1000,y:0,width:1000,height:800};}};
+ for(const k of ['x','y','width','height'])Object.defineProperty(w.actor,k,{get:()=>(w.drawn??w.frame)[k]});
+ return w;}
 try {
  const {default:Extension,mock}=await import(Gio.File.new_for_path(path).get_uri());
  function createExtension(){
@@ -200,6 +202,27 @@ try {
   await e._snap('left');
   assert(shown.length&&shown.every(v=>v.scale===1),'cap 0 only moves the image');
   mock.ints['max-stretch']=100;
+  e._waitForWindow=realWait;e._showAt=realShow;
+ }
+ // X11-style client: Mutter's frame rect jumps to each request at once, but
+ // the actor keeps drawing the previous buffer until the client repaints.
+ // The image must follow what is drawn, and latency comes from repaints.
+ {
+  const x=window();x.recordPlacement=()=>{};mock.focus=x;mock.neighbor=-1;
+  x.drawn={...x.frame};
+  x.move_resize_frame=function(u,px,py,width,height){this.drawn={...this.frame};this.frame={x:px,y:py,width,height};};
+  x.move_frame=function(){};
+  const realWait=e._waitForWindow;
+  e._waitForWindow=async(w,p,op)=>{w.drawn={...w.frame};return realWait(w,p,op);};
+  const shown=[];const realShow=e._showAt.bind(e);
+  e._showAt=(w,actor,r,anchor,cap)=>{realShow(w,actor,r,anchor,cap);
+   shown.push({r,x:actor.x+actor.translation_x+0*actor.scale_x,width:actor.width*actor.scale_x,stale:actor.width!==w.frame.width});};
+  e._latency.delete(x);
+  await e._snap('left');
+  assert(shown.some(v=>v.stale),'test drives frames where Mutter is ahead of the drawn buffer');
+  assert(shown.every(v=>Math.abs(v.x-v.r.x)<1e-6&&Math.abs(v.width-v.r.width)<1e-6),'image placed from drawn geometry, exactly on the curve');
+  assert(e._latency.get(x)>0,'latency measured from repaints, not frame-rect updates');
+  assert(x.actor.scale_x===1&&!e._visuals.has(x),'transform cleared after X11-style motion');
   e._waitForWindow=realWait;e._showAt=realShow;
  }
  // Interrupt mid-motion: the transform is kept and the next motion starts
