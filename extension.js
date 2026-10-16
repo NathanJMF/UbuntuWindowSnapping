@@ -18,7 +18,8 @@ const COVER_FADE_MS = 120;
 // Confirmation checks run about once per frame, starting immediately, so a
 // state that is already true settles in one frame instead of two 25 ms polls.
 const SETTLE_POLL_MS = 16;
-// Presses made while a window animates run afterwards, in order.
+// Presses made while a window animates interrupt it; up to this many are
+// combined into the next placement.
 const MAX_QUEUED = 3;
 const DIRECTIONS = ['left', 'right', 'up', 'down'];
 const NEIGHBOR = {left: Meta.DisplayDirection.LEFT, right: Meta.DisplayDirection.RIGHT,
@@ -341,75 +342,99 @@ export default class KeyboardMonitorSnap extends Extension {
         if (!this._dependencyReady() || !window)
             return;
         if (this._busy.has(window)) {
+            // Interrupt the running placement; once it unwinds, every queued
+            // press is folded into one placement from wherever the window is.
             const queue = this._queued.get(window) ?? [];
             if (queue.length < MAX_QUEUED)
                 queue.push(direction);
             this._queued.set(window, queue);
+            this._operations.get(window)?.supersede();
             return;
         }
-        this._trace(window, 'before', {direction});
+        await this._run(window, [direction]);
+    }
+    async _run(window, directions) {
+        this._trace(window, 'before', {directions});
         // Mutter can report maximized windows as non-resizable/non-movable.
         // Twm.tile unmaximizes before checking the underlying capabilities.
         const maximized = window.maximizedHorizontally || window.maximizedVertically;
         if (!maximized && (!window.allows_move() || !window.allows_resize())) {
-            this._trace(window, 'rejected-capability', {direction});
+            this._trace(window, 'rejected-capability', {directions});
             return;
         }
         this._busy.add(window);
         const operation = {owner:this._dependency.stateObj._keybindingHandler, cancelled:false,
-            cancel() {this.cancelled=true; this.cancelWait?.(); this.cancelAnimation?.();}};
+            cancel() {this.cancelled=true; this.cancelWait?.(); this.cancelAnimation?.();},
+            supersede() {if (!this.cancelled) {this.superseded=true; this.cancel();}}};
         this._operations.set(window, operation);
+        let intended = null;
         try {
-            let monitor = window.get_monitor();
             let state = this._states.get(window);
+            // An interrupted placement continues from its intended layout,
+            // not from the in-between frame the window is currently showing.
+            const superseded = Boolean(state?.superseded);
+            let monitor = superseded ? state.monitor : window.get_monitor();
             // A maximization or tile change outside these shortcuts resets the
             // sequence. Pure focus changes preserve each window's sequence.
-            const tracked = state && state.monitor === monitor &&
+            const tracked = superseded || (state && state.monitor === monitor &&
                 sameFrame(window.get_frame_rect(), state.frame) &&
                 (state.layout.x || state.layout.y
                     ? !Twm.isMaximized(window)
-                    : Twm.isMaximized(window));
+                    : Twm.isMaximized(window)));
             if (!tracked)
                 state = {layout: {...FULL}, monitor};
-            const neighbor = global.display.get_monitor_neighbor_index(monitor, NEIGHBOR[direction]);
-            const result = step(state.layout, direction, neighbor !== -1);
-            if (result.cross)
-                monitor = neighbor;
+            const startMonitor = monitor;
+            let layout = state.layout;
+            const crossings = [];
+            for (const direction of directions) {
+                const neighbor = global.display.get_monitor_neighbor_index(monitor, NEIGHBOR[direction]);
+                const result = step(layout, direction, neighbor !== -1);
+                layout = result.layout;
+                if (result.cross) {
+                    monitor = neighbor;
+                    crossings.push(result.cross);
+                }
+            }
             const area = window.get_work_area_for_monitor(monitor);
-            const target = rectangle(result.layout, area);
-            this._trace(window, 'decision', {direction, tracked:Boolean(tracked),
-                neighbor, crossing:result.cross, targetMonitor:monitor, target});
+            const target = rectangle(layout, area);
+            this._trace(window, 'decision', {directions, tracked:Boolean(tracked), superseded,
+                crossings, targetMonitor:monitor, target});
             // At an outer edge, an unchanged accepted half needs no new
             // resize transaction (particularly for minimum-size windows).
-            if (tracked && monitor === state.monitor && sameFrame(target, state.rect, 0)) {
-                this._trace(window, 'unchanged', {direction});
+            if (tracked && !superseded && monitor === startMonitor && sameFrame(target, state.rect, 0)) {
+                this._trace(window, 'unchanged', {directions});
                 return;
             }
-            if (tracked)
+            if (tracked && !superseded)
                 operation.previousPlacement = {monitor:state.monitor, target:state.rect, frame:state.frame};
+            intended = {layout, monitor, rect: target};
             const applied = await this._place(window, target, monitor, operation);
-            this._states.set(window, {layout: result.layout, monitor, rect: target, frame:applied.frame});
-            this._trace(window, 'after-request', {direction});
+            this._states.set(window, {...intended, frame:applied.frame});
+            this._trace(window, 'after-request', {directions});
             if (this._settings.get_boolean('debug-logging')) {
                 const source = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 250, () => {
                     this._traceTimers.delete(source);
-                    this._trace(window, 'after-settle', {direction});
+                    this._trace(window, 'after-settle', {directions});
                     return GLib.SOURCE_REMOVE;
                 });
                 this._traceTimers.add(source);
             }
         } catch (error) {
-            this._states.delete(window);
-            this._queued.delete(window);
+            if (operation.superseded && intended) {
+                this._states.set(window, {...intended, superseded:true});
+            } else {
+                this._states.delete(window);
+                this._queued.delete(window);
+            }
             if (!operation.cancelled) throw error;
         } finally {
             if (this._operations.get(window) === operation)
                 this._operations.delete(window);
             this._busy.delete(window);
         }
-        const next = this._queued.get(window)?.shift();
-        if (next && this._enabled)
-            await this._snap(next, window);
+        const next = this._queued.get(window)?.splice(0) ?? [];
+        if (next.length && this._enabled)
+            await this._run(window, next);
     }
     _releaseBindings() {
         for (const key of this._keys ?? [])

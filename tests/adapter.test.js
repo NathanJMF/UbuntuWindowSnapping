@@ -141,6 +141,26 @@ try {
  assert(a.maximizedHorizontally&&mock.skipped.length===1&&mock.covers===0,'half -> full skips the maximize zoom with no cover');
  assert(mock.frames.some(f=>f.width>500&&f.width<1000),'half -> full grows through real intermediate sizes');
  mock.animations=false;
+ // Interrupting: hold the first placement open, press Right twice, then
+ // release. Both presses fold into one placement straight to the right half.
+ {
+  const c=window();c.recordPlacement=()=>{};mock.focus=c;mock.neighbor=-1;
+  const realWait=e._waitForWindow;let release;const gate=new Promise(r=>release=r);let held=true;
+  e._waitForWindow=async(w,p,op)=>{if(held){held=false;await gate;}return realWait(w,p,op);};
+  const realPlace=e._place.bind(e);const targets=[];
+  const outcomes=[];e._place=(w,t,m,op)=>{targets.push({...t});const r=realPlace(w,t,m,op);r.then(()=>outcomes.push('done'),()=>outcomes.push('cancelled'));return r;};
+  const first=e._snap('left');
+  await Promise.resolve();
+  e._snap('right');e._snap('right');
+  assert(e._queued.get(c)?.length===2,'presses during placement wait to be folded');
+  release();await first;
+  assert(targets.length===2,'interrupted placement plus one folded placement, no intermediate full');
+  assert(targets[0].width===500&&targets[0].x===0,'first target was the left half');
+  assert(outcomes.join()==='cancelled,done','first placement was interrupted, not completed');
+  assert(c.tiledRect.x===500&&c.tiledRect.width===500&&!c.maximizedHorizontally,'left, right, right lands directly on the right half');
+  assert(!e._states.get(c).superseded&&e._states.get(c).layout.x==='right','folded result is the tracked state');
+  e._waitForWindow=realWait;e._place=realPlace;mock.focus=a;
+ }
  const beforeDependency=mock.tiles.length;
  mock.dependencyEnabled=false;
  await e._snap('left');
