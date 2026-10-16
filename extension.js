@@ -28,7 +28,12 @@ const RELAX_MS = 80;
 // bound for the request lead, and the guess for a window not yet measured.
 const LATENCY_WEIGHT = 0.4;
 const MAX_LEAD_MS = 120;
-const DEFAULT_LEAD_MS = 16;
+const DEFAULT_LATENCY_MS = 16;
+const DEFAULT_REDRAW_MS = 8;
+// Size requests go out continuously so a client always renders the newest
+// target, but no more often than this, and at most MAX_PENDING are tracked.
+const MIN_REQUEST_GAP_US = 4000;
+const MAX_PENDING = 64;
 // Presses made while a window animates interrupt it; up to this many are
 // combined into the next placement.
 const MAX_QUEUED = 3;
@@ -58,8 +63,10 @@ export default class KeyboardMonitorSnap extends Extension {
         // Window -> {rect, hold}: the on-screen rectangle currently shown by
         // an actor transform, and the post-animation hold timeline.
         this._visuals = new Map();
-        // Window -> smoothed milliseconds from a size request to its commit.
+        // Window -> smoothed milliseconds from a size request until it is
+        // drawn, and between successive redraws during a motion.
         this._latency = new WeakMap();
+        this._redraw = new WeakMap();
         this._traceTimers = new Set();
         this._operations = new Map();
         this._enabled = true;
@@ -251,8 +258,7 @@ export default class KeyboardMonitorSnap extends Extension {
         const duration = travelDuration(base, from, to);
         const anchor = anchorFor(from, to);
         const maxStretch = this._maxStretch();
-        const lead = Math.min(MAX_LEAD_MS, this._latency.get(window) ?? DEFAULT_LEAD_MS);
-        this._trace(window, 'animate', {from, to, duration, lead, maxStretch,
+        this._trace(window, 'animate', {from, to, duration, lead:this._lead(window), maxStretch,
             client: window.get_client_type?.() === Meta.WindowClientType.X11 ? 'x11' : 'wayland'});
         // A previous hold or relax transition is superseded by this motion.
         this._visuals.get(window)?.hold?.stop();
@@ -261,8 +267,9 @@ export default class KeyboardMonitorSnap extends Extension {
             // Linear timeline: the curve is evaluated directly so requests can
             // sample it ahead of the frame being drawn.
             const timeline = new Clutter.Timeline({actor, duration});
-            // Requests not yet seen committed, oldest first.
+            // Requests not yet seen drawn, oldest first.
             const sent = [];
+            let lastDrawn = null;
             let finished = false;
             const finish = error => {
                 if (finished) return;
@@ -294,15 +301,23 @@ export default class KeyboardMonitorSnap extends Extension {
                     if (sizeMatches(sent[i].rect)) { acked = i; break; }
                 }
                 if (acked !== -1) {
-                    this._sampleLatency(window, (now-sent[acked].at)/1000);
+                    this._sample(this._latency, window, (now-sent[acked].at)/1000);
                     sent.splice(0, acked+1);
                 }
-                // Ask for the size the curve will reach when the client is
-                // expected to commit it, so its commits land on the curve.
-                const ahead = interpolateRect(from, to, easeOutCubic((elapsed+lead)/duration));
+                // Each new drawn size ends one redraw interval.
+                if (!lastDrawn || lastDrawn.width !== frame.width || lastDrawn.height !== frame.height) {
+                    if (lastDrawn)
+                        this._sample(this._redraw, window, (now-lastDrawn.at)/1000);
+                    lastDrawn = {width: frame.width, height: frame.height, at: now};
+                }
+                // Ask for the size the curve will reach midway through the
+                // redraw that will show it, so drawn content straddles the curve.
+                const ahead = interpolateRect(from, to, easeOutCubic((elapsed+this._lead(window))/duration));
                 const last = sent.at(-1);
-                if ((!last || now-last.at >= 50000) && !(last && sameFrame(ahead, last.rect, 0))) {
+                if ((!last || now-last.at >= MIN_REQUEST_GAP_US) && !(last && sameFrame(ahead, last.rect, 0))) {
                     sent.push({rect: ahead, at: now});
+                    if (sent.length > MAX_PENDING)
+                        sent.shift();
                     apply(ahead);
                 }
                 const curve = interpolateRect(from, to, easeOutCubic(elapsed/duration));
@@ -310,6 +325,7 @@ export default class KeyboardMonitorSnap extends Extension {
                 if (this._settings.get_boolean('debug-logging'))
                     console.log(`${this.uuid}: FRAME ${JSON.stringify({id:window.get_id(), elapsed,
                         curve, drawn:frame, mutter:rect(window.get_frame_rect()), requested:sent.at(-1)?.rect ?? null,
+                        lead:Math.round(this._lead(window)*10)/10, pending:sent.length,
                         scale:[actor.scale_x, actor.scale_y].map(v => Math.round(v*1000)/1000)})}`);
             }, 'completed', () => finish(), this);
             actor.connectObject('destroy', () => finish(new Error('Placement cancelled')), timeline);
@@ -331,9 +347,17 @@ export default class KeyboardMonitorSnap extends Extension {
         return {buffer: drawn, frame: {x: drawn.x+left, y: drawn.y+top,
             width: drawn.width-left-right, height: drawn.height-top-bottom}};
     }
-    _sampleLatency(window, ms) {
-        const previous = this._latency.get(window);
-        this._latency.set(window, previous === undefined ? ms : previous + LATENCY_WEIGHT*(ms-previous));
+    _sample(map, window, ms) {
+        const previous = map.get(window);
+        map.set(window, previous === undefined ? ms : previous + LATENCY_WEIGHT*(ms-previous));
+    }
+    // A drawn frame was requested `latency` ago and stays on screen for one
+    // redraw interval; aiming half an interval past the latency centres the
+    // error between content and curve.
+    _lead(window) {
+        const latency = this._latency.get(window) ?? DEFAULT_LATENCY_MS;
+        const redraw = this._redraw.get(window) ?? DEFAULT_REDRAW_MS;
+        return Math.min(MAX_LEAD_MS, latency + redraw/2);
     }
     // Draw the window actor so its current real frame appears at `rect`,
     // within the stretch cap. Remembers what was actually drawn.

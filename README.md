@@ -194,3 +194,14 @@ journalctl -b _COMM=gnome-shell --no-pager --since "-5min" -o cat --grep 'keyboa
 ```
 
 Validation: 263 checks (121 rules, 67 adapter, 75 delayed placement), including an X11-style client whose frame rect runs ahead of its drawn buffer (fails on version 10).
+
+## Fuller look-ahead and continuous requests (version 12, experiment/animations branch)
+
+Version 11 logs (about 360 snaps on 500/200/144 Hz monitors) showed Chromium and Claude redrawing every 5–9 ms (median), yet in the first half of a snap their content trailed the curve by 80–180 px and hit the stretch cap on 40–77% of frames. Two causes:
+
+- **Look-ahead ignored redraw time.** A drawn frame was requested one lag ago and then stays on screen for a whole redraw interval while the curve moves on. Each window's redraw interval is now measured too, and requests aim at lag + half an interval (centring the error), recomputed every frame as measurements update. Unmeasured windows assume 16 ms lag and 8 ms redraws; the look-ahead is capped at 120 ms.
+- **One request at a time.** A new size was only requested after the previous one was drawn (or 50 ms passed), leaving the client idle between redraws. Requests now go out continuously, at most every 4 ms and only when the target changed, so the client always renders the newest target. Up to 64 undrawn requests are tracked for latency matching.
+
+`FRAME` log lines now include the current look-ahead and the number of undrawn requests.
+
+Validation: 271 checks (121 rules, 75 adapter, 75 delayed placement).

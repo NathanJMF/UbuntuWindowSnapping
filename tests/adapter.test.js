@@ -5,7 +5,7 @@ import {sameFrame} from '../placement.js';
 const root = Gio.File.new_for_uri(import.meta.url).get_parent().get_parent().get_path();
 const text = new TextDecoder().decode(GLib.file_get_contents(`${root}/extension.js`)[1]);
 const setup = `
-export const mock = {ints:{'animation-duration':250,'max-stretch':100}, animations:false, frames:[], skipped:[], covers:0, focus:null, neighbor:-1, bindings:new Map(), grab:null, tiles:[], values:new Map(), dependencyEnabled:true, timers:new Map(), handler:{}};
+export const mock = {clockStep:5000, ints:{'animation-duration':250,'max-stretch':100}, animations:false, frames:[], skipped:[], covers:0, focus:null, neighbor:-1, bindings:new Map(), grab:null, tiles:[], values:new Map(), dependencyEnabled:true, timers:new Map(), handler:{}};
 class Settings {
  constructor({schema_id}={}) {this.schema=schema_id??'custom';}
  get_strv(k) {return mock.values.get(this.schema+':'+k)??[];}
@@ -16,7 +16,7 @@ class Settings {
  set_string(k,v) {mock.values.set(this.schema+':'+k,v);}
 }
 const Gio={Settings};
-const GLib={PRIORITY_DEFAULT:0,SOURCE_CONTINUE:true,get_monotonic_time:(()=>{let t=0;return ()=>t+=60000;})(),
+const GLib={PRIORITY_DEFAULT:0,SOURCE_CONTINUE:true,get_monotonic_time:(()=>{let t=0;return ()=>t+=mock.clockStep;})(),
  timeout_add:(p,ms,cb)=>{const id=mock.timers.size+1;mock.timers.set(id,cb);return id;},
  Source:{remove:id=>mock.timers.delete(id)}};
 class Extension {getSettings(){return new Settings();}}
@@ -191,6 +191,7 @@ try {
   e._showAt=(w,actor,rect,anchor,cap)=>{realShow(w,actor,rect,anchor,cap);shown.push({rect,scale:actor.scale_x,drawn:{...e._visuals.get(w).rect}});};
   await e._snap('left');
   assert(e._latency.get(h)>0,'commit latency measured from a lagging client');
+  assert(e._redraw.get(h)>0,'redraw interval measured from successive drawn sizes');
   requests.length=0;shown.length=0;
   mock.ints['max-stretch']=6;
   await e._snap('right');
@@ -224,6 +225,37 @@ try {
   assert(e._latency.get(x)>0,'latency measured from repaints, not frame-rect updates');
   assert(x.actor.scale_x===1&&!e._visuals.has(x),'transform cleared after X11-style motion');
   e._waitForWindow=realWait;e._showAt=realShow;
+ }
+ // Look-ahead is the measured lag plus half a redraw interval, capped.
+ {
+  const w=window();
+  assert(e._lead(w)===20,'unmeasured window: 16 ms lag + half of 8 ms redraw');
+  e._latency.set(w,10);e._redraw.set(w,8);
+  assert(e._lead(w)===14,'measured: 10 ms lag + 4 ms');
+  e._latency.set(w,200);
+  assert(e._lead(w)===120,'look-ahead capped at 120 ms');
+ }
+ // Requests go out continuously while the client is still drawing an older
+ // one (previously one request waited up to 50 ms), but at most every 4 ms.
+ {
+  const run=async step=>{
+   const c=window();c.recordPlacement=()=>{};mock.focus=c;mock.neighbor=-1;c.drawn={...c.frame};
+   const requests=[];
+   c.move_resize_frame=function(u,x,y,width,height){this.frame={x,y,width,height};requests.push(width);};
+   c.move_frame=function(){};
+   const realWait=e._waitForWindow;
+   e._waitForWindow=async(w,p,op)=>{w.drawn={...w.frame};return realWait(w,p,op);};
+   mock.clockStep=step;
+   await e._snap('left');
+   mock.clockStep=5000;e._waitForWindow=realWait;
+   return {requests,c};
+  };
+  const fast=await run(5000);
+  assert(fast.requests.length>=3,'a new request on each frame while older ones are undrawn');
+  assert(fast.requests.every((w,i)=>i===0||w<=fast.requests[i-1]),'continuous requests move monotonically toward the target');
+  assert(fast.c.frame.width===500,'continuous requests still end on the exact target');
+  const limited=await run(1000);
+  assert(limited.requests.length<fast.requests.length,'requests rate-limited when frames come faster than 4 ms');
  }
  // Interrupt mid-motion: the transform is kept and the next motion starts
  // from the rectangle on screen, not from the lagging real frame.
