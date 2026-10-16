@@ -14,6 +14,13 @@ export function interpolateRect(from, to, t) {
     const at = k => Math.round(from[k] + (to[k]-from[k]) * t);
     return {x:at('x'), y:at('y'), width:at('width'), height:at('height')};
 }
+// Longer moves take a little longer: the largest edge travel, relative to
+// 1000 px, scales the base length by its square root within [0.75, 1.35].
+export function travelDuration(base, from, to) {
+    const travel = Math.max(Math.abs(from.x-to.x), Math.abs(from.y-to.y),
+        Math.abs(from.x+from.width-to.x-to.width), Math.abs(from.y+from.height-to.y-to.height));
+    return Math.round(base * Math.min(1.35, Math.max(0.75, Math.sqrt(travel/1000))));
+}
 // animate(from, to, apply) drives real frame changes so the client redraws
 // at every intermediate size. effects hides native maximize transitions.
 export async function placeWindow(window, target, monitor, {waitFor, both, constrain, clearConstraints,

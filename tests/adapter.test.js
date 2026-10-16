@@ -5,7 +5,7 @@ const root = Gio.File.new_for_uri(import.meta.url).get_parent().get_parent().get
 const text = new TextDecoder().decode(GLib.file_get_contents(`${root}/extension.js`)[1]);
 const setup = `
 import {FULL, step, rectangle} from '${Gio.File.new_for_path(root+'/engine.js').get_uri()}';
-import {placeWindow, sameFrame, interpolateRect} from '${Gio.File.new_for_path(root+'/placement.js').get_uri()}';
+import {placeWindow, sameFrame, interpolateRect, travelDuration} from '${Gio.File.new_for_path(root+'/placement.js').get_uri()}';
 export const mock = {animations:false, frames:[], skipped:[], covers:0, focus:null, neighbor:-1, bindings:new Map(), grab:null, tiles:[], values:new Map(), dependencyEnabled:true, timers:new Map(), handler:{}};
 class Settings {
  constructor({schema_id}={}) {this.schema=schema_id??'custom';}

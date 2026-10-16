@@ -1,4 +1,4 @@
-import {placeWindow,sameFrame,interpolateRect} from '../placement.js';
+import {placeWindow,sameFrame,interpolateRect,travelDuration} from '../placement.js';
 let assertions=0;
 function assert(value,message){assertions++;if(!value)throw new Error(message);}
 function environment({monitor=2,minWidth=0,cancelAt=Infinity,resizeDelay=4,geometryAssignsMonitor=false}={}) {
@@ -105,6 +105,13 @@ for (const [source,dest,target] of [
 {
  const r=interpolateRect({x:0,y:0,width:100,height:50},{x:100,y:10,width:50,height:50},0.5);
  assert(r.x===50&&r.y===5&&r.width===75&&r.height===50,'interpolated midpoint frame');
+}
+{
+ const half={x:0,y:0,width:1280,height:1355};
+ assert(travelDuration(120,half,{x:0,y:0,width:1280,height:677})===99,'half -> quarter (678 px) ~0.82x');
+ assert(travelDuration(120,half,{x:0,y:0,width:2560,height:1355})===136,'half -> full (1280 px) ~1.13x');
+ assert(travelDuration(120,half,{x:3640,y:0,width:1280,height:1355})===162,'monitor crossing clamps to 1.35x');
+ assert(travelDuration(0,half,{x:3640,y:0,width:1280,height:1355})===0,'disabled stays disabled');
 }
 function effectsLog(log){return {cover:()=>log.push('cover'),skip:()=>log.push('skip'),uncover:()=>log.push('uncover'),release:()=>log.push('release')};}
 // Animation waits for each intermediate frame like a live client would.

@@ -11,7 +11,7 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {TilingWindowManager as Twm} from 'file:///usr/share/gnome-shell/extensions/tiling-assistant@ubuntu.com/src/extension/tilingWindowManager.js';
 import {Rect} from 'file:///usr/share/gnome-shell/extensions/tiling-assistant@ubuntu.com/src/extension/utility.js';
 import {FULL, step, rectangle} from './engine.js';
-import {placeWindow, sameFrame, interpolateRect} from './placement.js';
+import {placeWindow, sameFrame, interpolateRect, travelDuration} from './placement.js';
 
 const UUID = 'tiling-assistant@ubuntu.com';
 const COVER_FADE_MS = 120;
@@ -219,10 +219,11 @@ export default class KeyboardMonitorSnap extends Extension {
     // acknowledged the previous size, or after a short timeout, so slow
     // clients are not flooded; the final target is always sent afterwards.
     _animate(window, from, to, apply, operation) {
-        const duration = this._animationDuration();
+        const base = this._animationDuration();
         const actor = window.get_compositor_private();
-        if (!duration || !actor)
+        if (!base || !actor)
             return Promise.resolve();
+        const duration = travelDuration(base, from, to);
         this._trace(window, 'animate', {from, to, duration});
         return new Promise((resolve, reject) => {
             const timeline = new Clutter.Timeline({actor, duration,
