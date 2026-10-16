@@ -10,7 +10,7 @@ Read [RULES.md](RULES.md) for the agreed behaviour. The project changes keyboard
 - `extension.js`: GNOME 50 shortcuts, per-window transactions, confirmed-frame state, and Tiling Assistant restore metadata. Does not patch mouse handlers or Tiling Assistant methods.
 - `placement.js`: ordered unmaximize, monitor transfer, resize, and maximize requests with confirmation between stages.
 - `schemas/`: the four shortcuts and saved previous bindings.
-- `tests/rules.test.js`: 81 assertions for the agreed behaviour.
+- `tests/rules.test.js`: 113 assertions for the agreed behaviour.
 - `tests/adapter.test.js`: regression checks against the actual extension source with mocked GNOME APIs (maximized windows, monitor crossing, per-window reset and cleanup).
 - `install.sh`: test, compile schemas, install locally, retire the old patch, enable for login.
 - `uninstall.sh`: disable this extension and restore previous keyboard bindings. The popup stays disabled.
@@ -54,7 +54,7 @@ gjs -m tests/placement.test.js
 glib-compile-schemas --strict schemas
 ```
 
-The pure engine and adapter mock tests pass (142 assertions total). Live keyboard behaviour must be verified after GNOME loads the extension at login; unit tests cannot establish Mutter's actual resizing behaviour.
+The pure engine and adapter mock tests pass (177 assertions total). Live keyboard behaviour must be verified after GNOME loads the extension at login; unit tests cannot establish Mutter's actual resizing behaviour.
 
 ## Disable / rollback
 
@@ -115,3 +115,11 @@ Wait errors now name the stage (`unmaximize`, `monitor-and-frame`, or `maximize`
 An opposite arrow from a half now maximizes on the current monitor first; repeating it then selects the opposite half. All four half/opposite-direction pairs follow this rule, whether neighboring monitors exist or not. Quarter combinations and outward monitor crossing are unchanged.
 
 Version 4 validation: 142 checks (81 rules, 29 adapter, 32 delayed placement).
+
+## Quarter intermediate halves (version 5)
+
+An opposite arrow from a quarter now removes that split first, preserving the other axis. Example: bottom-right → Up → right half → Up → top-right. All eight quarter/opposite-direction combinations follow this rule; neighbors do not cause crossing during the intermediate steps. Opposite halves still pass through full size. Outward expansion and monitor crossing rules are unchanged.
+
+Animation preference update: GNOME desktop animations and Tiling Assistant tile/untile animations were restored to enabled. Earlier animation-disable notes above describe historical troubleshooting.
+
+Version 5 validation: 177 checks (113 rules, 32 adapter, 32 delayed placement); independent review returned no findings.

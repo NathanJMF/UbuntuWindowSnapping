@@ -49,7 +49,24 @@ for (const [first,opposite] of [['left','right'],['right','left'],['up','down'],
         equal(results[2],{layout:half,cross:null},`${first} -> ${opposite} -> ${opposite} then half, neighbor=${neighbors}`);
     }
 }
-equal(sequence(['up','left','right'])[2].layout,{x:'right',y:'up'},'opposite-quarter rule remains unchanged');
+equal(sequence(['up','left','right'])[2].layout,{x:null,y:'up'},'opposite horizontal arrow from quarter first takes top half');
+for (const x of ['left','right']) {
+    for (const y of ['up','down']) {
+        for (const occupied of [x,y]) {
+            const opposite={left:'right',right:'left',up:'down',down:'up'}[occupied];
+            const axis=['left','right'].includes(occupied)?'x':'y';
+            for (const neighbors of [false,true]) {
+                const quarter={x,y};
+                const half={...quarter};half[axis]=null;
+                const destination={...quarter};destination[axis]=opposite;
+                const first=step(quarter,opposite,neighbors);
+                equal(first,{layout:half,cross:null},`${x}/${y} -> ${opposite} removes only reversed split, neighbor=${neighbors}`);
+                equal(step(first.layout,opposite,neighbors),{layout:destination,cross:null},`${x}/${y} -> ${opposite} twice reaches opposite quarter, neighbor=${neighbors}`);
+            }
+        }
+    }
+}
+
 for (const d of ['left','right','up','down']) {
     equal(step(FULL,d,false),step(FULL,d,true),`${d} cannot cross on first press`);
 }

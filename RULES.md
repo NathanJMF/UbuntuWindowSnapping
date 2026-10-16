@@ -39,7 +39,16 @@ From a half, pressing the opposite direction first maximizes on the current moni
 - Top half → Down → full → Down → bottom half.
 - Bottom half → Up → full → Up → top half.
 
-Quarter opposite-direction behaviour remains unchanged: it replaces that axis and retains the other one. Top-left quarter then Right becomes Top-right quarter; Top-left then Down becomes Bottom-left.
+From a quarter, an opposite arrow first removes that axis's split, keeping the other axis. Another press then adds the opposite split. No monitor crossing happens during these intermediate steps:
+
+- Bottom-right → Up → right half → Up → top-right.
+- Top-right → Down → right half → Down → bottom-right.
+- Bottom-left → Up → left half → Up → top-left.
+- Top-left → Down → left half → Down → bottom-left.
+- Bottom-right → Left → bottom half → Left → bottom-left.
+- Bottom-left → Right → bottom half → Right → bottom-right.
+- Top-right → Left → top half → Left → top-left.
+- Top-left → Right → top half → Right → top-right.
 
 ## Repeated direction and monitor movement
 
@@ -80,4 +89,4 @@ Thus Up twice maximizes locally if there is no monitor above. If a monitor is ab
 
 ## Animation preference
 
-Desktop window animations and Tiling Assistant tile/untile animations are disabled. Snapping changes position immediately. This does not change the mouse snapping target regions.
+GNOME desktop animations and Tiling Assistant tile/untile animations have been restored. Mouse snapping target regions remain unchanged; custom keyboard geometry placement is independent of these animation preferences.

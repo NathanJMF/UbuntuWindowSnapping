@@ -92,6 +92,12 @@ try {
  assert(a.monitor===0&&a.maximizedHorizontally&&a.maximizedVertically,'opposite arrow from left half goes full locally');
  await e._snap('right');
  assert(a.monitor===0&&a.tiledRect.x===500&&a.tiledRect.width===500,'next opposite arrow selects right half locally');
+ await e._snap('down');
+ assert(a.tiledRect.x===500&&a.tiledRect.y===400&&a.tiledRect.height===400,'right half plus Down becomes bottom-right quarter');
+ await e._snap('up');
+ assert(a.monitor===0&&a.tiledRect.x===500&&a.tiledRect.y===0&&a.tiledRect.height===800,'bottom-right plus Up expands to right half');
+ await e._snap('up');
+ assert(a.monitor===0&&a.tiledRect.x===500&&a.tiledRect.y===0&&a.tiledRect.height===400,'next Up becomes top-right quarter without crossing');
  const beforeDependency=mock.tiles.length;
  mock.dependencyEnabled=false;
  await e._snap('left');

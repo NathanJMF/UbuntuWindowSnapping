@@ -19,11 +19,12 @@ export function step(layout, direction, hasNeighbor) {
             return {layout: {...FULL}, cross: null};
         return {layout: next, cross: null};
     }
-    // Opposite halves pass through full size before selecting the other half.
-    // Quarter transitions keep their existing two-axis rules.
-    const perpendicular = axis === 'x' ? 'y' : 'x';
-    if (next[axis] !== null && next[perpendicular] === null)
-        return {layout: {...FULL}, cross: null};
+    // An opposite arrow removes its existing split first. A quarter becomes
+    // a half; a half becomes full. The next press adds the opposite split.
+    if (next[axis] !== null) {
+        next[axis] = null;
+        return {layout: next, cross: null};
+    }
     next[axis] = direction;
     return {layout: next, cross: null};
 }
