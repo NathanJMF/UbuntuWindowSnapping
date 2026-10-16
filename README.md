@@ -54,7 +54,7 @@ gjs -m tests/placement.test.js
 glib-compile-schemas --strict schemas
 ```
 
-The pure engine and adapter mock tests pass (113 assertions total). Live keyboard behaviour must be verified after GNOME loads the extension at login; unit tests cannot establish Mutter's actual resizing behaviour.
+The pure engine and adapter mock tests pass (123 assertions total). Live keyboard behaviour must be verified after GNOME loads the extension at login; unit tests cannot establish Mutter's actual resizing behaviour.
 
 ## Disable / rollback
 
@@ -103,3 +103,9 @@ Live traces established that Chromium can clear TA tiling metadata after a half 
 Requests are bounded and canceled by mouse grabs, extension disable, dependency changes, and window closure. Repeated unchanged boundary positions do not issue redundant geometry requests. Known minimum-size dimensions are reused for opposite-side moves only when the previous confirmed frame, monitor, and requested dimensions match. Temporary geometry logging remains available without recording titles or page contents.
 
 Validation: 113 assertions pass (64 rules, 27 adapter mocks, 22 delayed-placement checks). Three review rounds completed; the final round had no actionable findings. Native Chromium/Wayland behaviour still needs live acceptance testing after logging in with version 2.
+
+## Portrait return sequencing correction (version 3)
+
+Live version 2 logs showed correct return-to-main decisions followed by placement timeouts for both Chromium and ChatGPT. The code waited for a destination monitor identity before issuing absolute target geometry. Version 3 clears the old edge constraints, sends monitor intent and absolute target position/size without that intervening wait, then confirms monitor and geometry together before maximizing. Destination edge constraints are applied only after the destination is confirmed.
+
+Wait errors now name the stage (`unmaximize`, `monitor-and-frame`, or `maximize`) and record requested and actual geometry. The added regression models a compositor where only the absolute geometry commit can change the window monitor. Current validation: 123 assertions (64 rules, 27 adapter mocks, 32 delayed-placement assertions). This is not a substitute for the next live login test.

@@ -5,7 +5,7 @@ export function sameFrame(a, b, tolerance = 3) {
 export function frameCopy(r) {
     return {x:r.x, y:r.y, width:r.width, height:r.height};
 }
-export async function placeWindow(window, target, monitor, {waitFor, both, constrain, acceptedFrame = null, previousPlacement = null}) {
+export async function placeWindow(window, target, monitor, {waitFor, both, constrain, clearConstraints, acceptedFrame = null, previousPlacement = null}) {
     const full = sameFrame(target, window.get_work_area_for_monitor(monitor), 0);
     // acceptedFrame must come from a prior confirmed placement of this same
     // target; it cannot be inferred from an arbitrary oversized current frame.
@@ -25,15 +25,16 @@ export async function placeWindow(window, target, monitor, {waitFor, both, const
         else
             window.unmaximize(both);
     }
-    await waitFor(() => !window.maximizedHorizontally && !window.maximizedVertically && !window.fullscreen);
+    await waitFor(() => !window.maximizedHorizontally && !window.maximizedVertically && !window.fullscreen, 'unmaximize');
     if (!window.allows_move() || !window.allows_resize())
         throw new Error('Window cannot move or resize after unmaximizing');
-    if (window.get_monitor() !== monitor) {
-        window.move_to_monitor(monitor);
-        await waitFor(() => window.get_monitor() === monitor);
-    }
-    constrain?.(window, target, monitor);
     const before = frameCopy(window.get_frame_rect());
+    // Old monitor-edge constraints can keep a window attached to its source.
+    // Absolute geometry must be sent before waiting for destination identity:
+    // some compositors assign the monitor only when that geometry commits.
+    clearConstraints?.(window);
+    if (window.get_monitor() !== monitor)
+        window.move_to_monitor(monitor);
     // Reuse a size only when this window already confirmed it for the same
     // requested dimensions on the same monitor. This supports opposite-side
     // movement of minimum-size apps without guessing whether a resize landed.
@@ -43,7 +44,7 @@ export async function placeWindow(window, target, monitor, {waitFor, both, const
         target.height === previousPlacement.target.height;
     const appliedTarget = knownSize
         ? {...target, width:before.width, height:before.height} : target;
-    if (!sameFrame(before, appliedTarget)) {
+    if (window.get_monitor() !== monitor || !sameFrame(before, appliedTarget)) {
         window.move_frame(true, appliedTarget.x, appliedTarget.y);
         window.move_resize_frame(true, appliedTarget.x, appliedTarget.y, appliedTarget.width, appliedTarget.height);
     }
@@ -63,7 +64,8 @@ export async function placeWindow(window, target, monitor, {waitFor, both, const
         previous = frameCopy(frame);
         const sizeChanged = Math.abs(frame.width-before.width) > 3 || Math.abs(frame.height-before.height) > 3;
         return onMonitor && positioned && constrained && sizeChanged && stable >= 5;
-    });
+    }, 'monitor-and-frame');
+    constrain?.(window, target, monitor);
     if (full) {
         // Never issue maximize while a move_to_monitor is still pending.
         if (window.maximize.length === 0)
@@ -72,7 +74,7 @@ export async function placeWindow(window, target, monitor, {waitFor, both, const
             window.maximize(both);
         await waitFor(() => window.get_monitor() === monitor &&
             window.maximizedHorizontally && window.maximizedVertically &&
-            sameFrame(window.get_frame_rect(), target));
+            sameFrame(window.get_frame_rect(), target), 'maximize');
     }
     return {frame: frameCopy(window.get_frame_rect()), full};
 }

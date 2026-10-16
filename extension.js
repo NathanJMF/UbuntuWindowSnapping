@@ -58,7 +58,7 @@ export default class KeyboardMonitorSnap extends Extension {
             const key = `snap-${direction}`;
             Main.wm.addKeybinding(key, this._settings, Meta.KeyBindingFlags.IGNORE_AUTOREPEAT,
                 Shell.ActionMode.NORMAL, () => {
-                    this._snap(direction).catch(e => console.error(`${this.uuid}: ${e.stack ?? e}`));
+                    this._snap(direction).catch(e => console.error(`${this.uuid}: ${e.message ?? e}\n${e.stack ?? ''}`));
                 });
             this._keys.push(key);
         }
@@ -118,7 +118,8 @@ export default class KeyboardMonitorSnap extends Extension {
         for (const operation of this._operations?.values() ?? [])
             operation.cancel();
     }
-    _waitForWindow(window, predicate, operation) {
+    _waitForWindow(window, predicate, operation, stage = 'geometry') {
+        this._trace(window, 'wait-start', {stage, targetMonitor:operation.targetMonitor, target:operation.target});
         return new Promise((resolve, reject) => {
             let source = null;
             let finished = false;
@@ -142,7 +143,11 @@ export default class KeyboardMonitorSnap extends Extension {
                         stable = predicate() ? stable+1 : 0;
                         if (stable >= 2) finish();
                         else if (GLib.get_monotonic_time()-start > 2000000)
-                            finish(new Error('Window geometry did not settle within two seconds'));
+                            {
+                                this._trace(window, 'wait-timeout', {stage,
+                                    targetMonitor:operation.targetMonitor, target:operation.target});
+                                finish(new Error(`Placement timed out at ${stage}`));
+                            }
                     }
                 } catch (error) { finish(error); }
                 return finished ? GLib.SOURCE_REMOVE : GLib.SOURCE_CONTINUE;
@@ -150,6 +155,8 @@ export default class KeyboardMonitorSnap extends Extension {
         });
     }
     async _place(window, target, monitor, operation) {
+        operation.targetMonitor = monitor;
+        operation.target = target;
         const original = window.untiledRect ?? new Rect(window.get_frame_rect());
         Twm.clearTilingProps(window.get_id());
         window.isTiled = false;
@@ -157,7 +164,13 @@ export default class KeyboardMonitorSnap extends Extension {
         const applied = await placeWindow(window, target, monitor, {
             both: Meta.MaximizeFlags.BOTH,
             previousPlacement: operation.previousPlacement,
-            waitFor: predicate => this._waitForWindow(window, predicate, operation),
+            waitFor: (predicate, stage) => this._waitForWindow(window, predicate, operation, stage),
+            clearConstraints: w => {
+                if (w.override_constraints) {
+                    const none = Meta.WindowConstraint.NONE;
+                    w.override_constraints(none, none, none, none);
+                }
+            },
             constrain: (w, rect, m) => {
                 if (!w.override_constraints) return;
                 const area = w.get_work_area_for_monitor(m);
