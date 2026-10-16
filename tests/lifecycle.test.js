@@ -190,28 +190,8 @@ const flush = async () => {
 let win = null;
 const step = async (ms = 4) => {
     mock.clock += ms*1000;
-    // Every drawn frame damages the actor. A `relayout` client (Chromium)
-    // first shows the old layout at a new size and re-lays out that many ms
-    // later; a `video` client redraws on every step.
-    while (win && win.queue.length && mock.clock >= win.queue[0].due) {
-        const r = win.queue.shift().r;
-        const resized = r.width !== win.drawn.width || r.height !== win.drawn.height;
-        win.drawn = r;
-        if (resized && win.relayout) {
-            win.content = 'stale';
-            win.relayoutAt = mock.clock + win.relayout*1000;
-        } else if (resized) {
-            win.content = 'laid-out';
-        }
-        win.actor.emit('damaged');
-    }
-    if (win?.relayoutAt && mock.clock >= win.relayoutAt) {
-        win.relayoutAt = null;
-        win.content = 'laid-out';
-        win.actor.emit('damaged');
-    }
-    if (win?.video)
-        win.actor.emit('damaged');
+    while (win && win.queue.length && mock.clock >= win.queue[0].due)
+        win.drawn = win.queue.shift().r;
     for (const t of [...mock.timelines]) t.tick(ms);
     mock.timelines = mock.timelines.filter(t => !t.stopped);
     mock.later.splice(0).forEach(f => f());
@@ -700,7 +680,7 @@ const halfState = w => e._states.set(w, {layout:{x:'left', y:null}, monitor:0,
 // morph aims at the granted size, hands over as soon as the app draws it,
 // and needs no correction after the motion.
 {
-    const w = fresh({frame:{...AREAS[0]}, lag:20});
+    const w = fresh({frame:{...AREAS[0]}});
     w.minWidth = 700;
     e._states.set(w, {layout:{x:null, y:null}, monitor:0, rect:{...AREAS[0]}, frame:{...AREAS[0]}});
     mock.widgets = [];
@@ -718,8 +698,7 @@ const halfState = w => e._states.set(w, {layout:{x:'left', y:null}, monitor:0,
     await p;
     e._hold = real;
     assert(mock.widgets[0].moves.at(-1).width === 700, 'snapshot morphs to the granted 700 px, not the unreachable 500 px');
-    // Drawn at 20 ms, quiet for 24 ms: handover at about 44 ms (60% is 54 ms).
-    assert(shownAt !== null && shownAt <= 50, `live window shown once the app draws its granted size (at ${shownAt} ms)`);
+    assert(shownAt !== null && shownAt <= 48, `live window shown once the app draws its granted size (at ${shownAt} ms)`);
     assert(holds.length === 1 && holds[0].width === 700, 'hold keeps the granted size: no squeeze and relax afterwards');
     assert(w.drawn.width === 700 && mock.widgets.every(x => x.destroyed), 'minimum width kept, snapshot gone');
     clean(w, 'morph minimum size');
@@ -744,59 +723,6 @@ const halfState = w => e._states.set(w, {layout:{x:'left', y:null}, monitor:0,
     assert(shownAt !== null && shownAt <= 62, `slow app: live window fades in at 60% of the motion (at ${shownAt} ms)`);
     assert(mock.widgets.every(x => x.destroyed), 'snapshot gone');
     clean(w, 'morph slow app');
-}
-
-// 22c. Chromium-style relayout: the first frame at the new size still has
-// the old layout. The handover waits for the re-laid-out frame.
-{
-    // A 240 ms base makes this motion 180 ms, putting the 60% fallback at
-    // 108 ms, well clear of the quiet handover.
-    mock.ints['animation-duration'] = 240;
-    const w = fresh({frame:{x:0, y:0, width:500, height:800}, lag:20});
-    w.relayout = 10;
-    halfState(w);
-    mock.widgets = [];
-    let contentAtHandover = null, shownAt = null;
-    const start = mock.clock;
-    const p = press('right');
-    for (let i = 0; i < 100; i++) {
-        await step(2);
-        if (contentAtHandover === null && w.actor.opacity === 255 && e._visuals.has(w)) {
-            contentAtHandover = w.content;
-            shownAt = (mock.clock-start)/1000;
-        }
-    }
-    await settle(600);
-    await p;
-    assert(contentAtHandover === 'laid-out', `live window handed over only after the re-layout (saw ${contentAtHandover})`);
-    // Drawn at 20 ms, re-laid out at 30 ms, then 24 ms quiet: about 54 ms.
-    assert(shownAt >= 52 && shownAt <= 60, `handover once content went quiet (at ${shownAt} ms)`);
-    mock.ints['animation-duration'] = 120;
-    clean(w, 'morph relayout');
-}
-
-// 22d. Constant redraws (video): content never goes quiet, so the handover
-// happens at 60% of the motion.
-{
-    mock.ints['animation-duration'] = 240;
-    const w = fresh({frame:{x:0, y:0, width:500, height:800}, lag:20});
-    w.video = true;
-    halfState(w);
-    mock.widgets = [];
-    let shownAt = null;
-    const start = mock.clock;
-    const p = press('right');
-    for (let i = 0; i < 100; i++) {
-        await step(2);
-        if (shownAt === null && w.actor.opacity === 255 && e._visuals.has(w)) shownAt = (mock.clock-start)/1000;
-    }
-    await settle(600);
-    await p;
-    w.video = false;
-    mock.ints['animation-duration'] = 120;
-    // 180 ms motion; 60% is 108 ms.
-    assert(shownAt >= 106 && shownAt <= 112, `video: handover at 60% of the motion (at ${shownAt} ms)`);
-    clean(w, 'morph video');
 }
 
 // 23. Closing mid-morph removes the snapshot and stops driving the window.

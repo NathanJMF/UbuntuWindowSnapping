@@ -296,11 +296,3 @@ Validation: 478 checks (121 rules, 77 adapter, 79 delayed placement, 201 lifecyc
 A weird frame near the end of some morphs came from minimum-size apps. Claude will not go narrower than 600 px, but the portrait monitor's half is 540 px. Version 17 waited for a 540 px frame that never came, so it fell back to the 60% handover, morphed the snapshot to 540 px, held the 600 px window squeezed to 540 px for 150 ms, then relaxed it out to 600 px. Mutter applies an app's size limits to the request immediately, so the frame it reports right after the request is the size the app will draw. The morph now targets that granted frame (when it sits on the requested edges) for the snapshot, the handover and the hold. The 60% handover remains for apps that are simply slow.
 
 Validation: 487 checks (121 rules, 77 adapter, 79 delayed placement, 210 lifecycle), including a minimum-size app and a 300 ms app.
-
-## Hand over after the content settles (version 19, experiment/animations branch)
-
-Claude desktop (Electron/Chromium) showed a frame with text on the left that then jumped to the middle when going between left half and full. Chromium often presents its first frame at a new size with the old layout and re-lays out a frame or two later. Version 18 handed over on that first frame.
-
-The morph now listens to the window actor's `damaged` signal (emitted whenever the app draws). The live window takes over only when the app has drawn the final size and then drawn nothing new for 24 ms. A single-draw app such as a terminal hands over 24 ms after its draw; an app that keeps redrawing, such as a playing video, falls back to the 60% handover. `FRAME` logs include `sized` and `sinceDamage`.
-
-Validation: 500 checks (121 rules, 77 adapter, 79 delayed placement, 223 lifecycle), including a client that re-lays out 10 ms after resizing and one that redraws constantly.

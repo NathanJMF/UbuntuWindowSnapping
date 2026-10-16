@@ -22,10 +22,6 @@ const COVER_FADE_MS = 120;
 // (minimum-size apps never reach the requested size).
 const MORPH_FADE_MS = 70;
 const MORPH_READY_LIMIT = 0.6;
-// Chromium-based apps often present their first frame at a new size with
-// the old layout, then re-lay out a frame or two later. The handover waits
-// until the app has drawn the final size and then nothing new for this long.
-const MORPH_QUIET_MS = 24;
 // Confirmation checks run about once per frame, starting immediately, so a
 // state that is already true settles in one frame instead of two 25 ms polls.
 const SETTLE_POLL_MS = 16;
@@ -457,8 +453,6 @@ export default class KeyboardMonitorSnap extends Extension {
             const timeline = new Clutter.Timeline({actor, duration});
             // Elapsed time when the live window began to fade in.
             let fadeFrom = null;
-            // When the app last drew anything (the snapshot counts as drawn).
-            let lastDamage = GLib.get_monotonic_time();
             let finished = false;
             const finish = error => {
                 if (finished) return;
@@ -489,8 +483,7 @@ export default class KeyboardMonitorSnap extends Extension {
                 cover.set_position(curve.x, curve.y);
                 cover.set_size(curve.width, curve.height);
                 const drawn = this._drawnFrame(window, actor).frame;
-                const sized = Math.abs(drawn.width-end.width) <= 3 && Math.abs(drawn.height-end.height) <= 3;
-                const ready = sized && GLib.get_monotonic_time()-lastDamage >= MORPH_QUIET_MS*1000;
+                const ready = Math.abs(drawn.width-end.width) <= 3 && Math.abs(drawn.height-end.height) <= 3;
                 if (fadeFrom === null && (ready || elapsed >= MORPH_READY_LIMIT*duration))
                     fadeFrom = elapsed;
                 if (fadeFrom !== null) {
@@ -505,12 +498,10 @@ export default class KeyboardMonitorSnap extends Extension {
                 }
                 if (this._settings.get_boolean('debug-logging'))
                     console.log(`${this.uuid}: FRAME ${JSON.stringify({id:window.get_id(), style:'morph', elapsed,
-                        curve, drawn, sized, ready, fadeFrom, cover:cover.opacity,
-                        sinceDamage:Math.round((GLib.get_monotonic_time()-lastDamage)/1000),
+                        curve, drawn, ready, fadeFrom, cover:cover.opacity,
                         scale:[actor.scale_x, actor.scale_y].map(v => Math.round(v*1000)/1000)})}`);
             }, 'completed', () => finish(), this);
-            actor.connectObject('destroy', () => operation.cancel(),
-                'damaged', () => {lastDamage = GLib.get_monotonic_time();}, timeline);
+            actor.connectObject('destroy', () => operation.cancel(), timeline);
             window.connectObject?.('unmanaging', () => operation.cancel(), timeline);
             timeline.start();
         });
