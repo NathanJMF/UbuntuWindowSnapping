@@ -11,7 +11,7 @@
     </key>
     <key name="max-stretch" type="i">
       <range min="0" max="100"/>
-      <default>6</default>
+      <default>3</default>
       <summary>Largest stretch of a lagging window's image during snaps, in percent (0 = move only)</summary>
     </key>
     <key name="debug-logging" type="b"><default>false</default></key>

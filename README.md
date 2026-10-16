@@ -214,3 +214,5 @@ Version 12 felt rubbery again. Its logs showed less lag (first-quarter cap hits 
 - **Stretch is one-sided.** Per axis, a growing window's image may only be stretched toward the curve and a shrinking window's only compressed. Content that gets ahead is shown at its real size instead of being squashed back, so the image cannot flip direction and its edges never move backwards.
 
 Validation: 278 checks (121 rules, 77 adapter, 80 delayed placement), including a client whose drawn sizes jitter ahead of and behind its requests.
+
+Default stretch cap lowered to 3% after live comparison (version 13): less visible bounce, with YouTube and terminals resizing well. Terminals resized vertically can still show text shifting slightly; this comes from the terminal's own row layout (it also happens when resizing with the mouse), not from the stretch.
