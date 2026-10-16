@@ -676,11 +676,38 @@ const halfState = w => e._states.set(w, {layout:{x:'left', y:null}, monitor:0,
     clean(w, 'morph');
 }
 
-// 22. A minimum-size app never reaches the target: the fade starts at 60%
-// of the motion anyway and everything is cleaned up.
+// 22. A minimum-size app: Mutter grants 700 px for a 500 px request. The
+// morph aims at the granted size, hands over as soon as the app draws it,
+// and needs no correction after the motion.
 {
     const w = fresh({frame:{...AREAS[0]}});
     w.minWidth = 700;
+    e._states.set(w, {layout:{x:null, y:null}, monitor:0, rect:{...AREAS[0]}, frame:{...AREAS[0]}});
+    mock.widgets = [];
+    const start = mock.clock;
+    let shownAt = null;
+    const holds = [];
+    const real = e._hold.bind(e);
+    e._hold = (w_, actor, target, shape) => {holds.push({...target}); real(w_, actor, target, shape);};
+    const p = press('left');
+    for (let i = 0; i < 80; i++) {
+        await step(4);
+        if (shownAt === null && w.actor.opacity === 255 && e._visuals.has(w)) shownAt = (mock.clock-start)/1000;
+    }
+    await settle(800);
+    await p;
+    e._hold = real;
+    assert(mock.widgets[0].moves.at(-1).width === 700, 'snapshot morphs to the granted 700 px, not the unreachable 500 px');
+    assert(shownAt !== null && shownAt <= 48, `live window shown once the app draws its granted size (at ${shownAt} ms)`);
+    assert(holds.length === 1 && holds[0].width === 700, 'hold keeps the granted size: no squeeze and relax afterwards');
+    assert(w.drawn.width === 700 && mock.widgets.every(x => x.destroyed), 'minimum width kept, snapshot gone');
+    clean(w, 'morph minimum size');
+}
+
+// 22b. A very slow app (300 ms to draw): the live window fades in at 60% of
+// the motion anyway, and the hold covers the rest.
+{
+    const w = fresh({frame:{...AREAS[0]}, lag:300});
     e._states.set(w, {layout:{x:null, y:null}, monitor:0, rect:{...AREAS[0]}, frame:{...AREAS[0]}});
     mock.widgets = [];
     const start = mock.clock;
@@ -693,9 +720,9 @@ const halfState = w => e._states.set(w, {layout:{x:'left', y:null}, monitor:0,
     await settle(800);
     await p;
     // Full -> left half lasts 90 ms at the 120 ms base; 60% of that is 54 ms.
-    assert(shownAt !== null && shownAt <= 62, `live window fades in at 60% of the motion without reaching the target (at ${shownAt} ms)`);
-    assert(w.drawn.width === 700 && mock.widgets.every(x => x.destroyed), 'minimum width kept, snapshot gone');
-    clean(w, 'morph minimum size');
+    assert(shownAt !== null && shownAt <= 62, `slow app: live window fades in at 60% of the motion (at ${shownAt} ms)`);
+    assert(mock.widgets.every(x => x.destroyed), 'snapshot gone');
+    clean(w, 'morph slow app');
 }
 
 // 23. Closing mid-morph removes the snapshot and stops driving the window.

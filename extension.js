@@ -428,16 +428,27 @@ export default class KeyboardMonitorSnap extends Extension {
         const cover = effects.snapshot();
         if (!base || !actor || !cover)
             return this._animate(window, from, to, apply, operation);
-        const duration = travelDuration(base, from, to);
-        const anchor = anchorFor(from, to);
+        // One request for the final size; nothing in between.
+        apply(to);
+        // Mutter applies the app's size limits (e.g. a minimum width) to the
+        // request at once, so its frame shows the size the app will draw.
+        // Morph to that: aiming at an unreachable size delays the handover
+        // and leaves a correction after the motion. Only a granted frame on
+        // the requested edges is trusted.
+        const granted = rect(window.get_frame_rect());
+        const aligned = (start, size) =>
+            Math.abs(granted[start]-to[start]) <= 3 ||
+            Math.abs(granted[start]+granted[size]-to[start]-to[size]) <= 3;
+        const end = granted.width > 0 && granted.height > 0 &&
+            aligned('x', 'width') && aligned('y', 'height') ? granted : to;
+        const duration = travelDuration(base, from, end);
+        const anchor = anchorFor(from, end);
         const exact = {anchor, maxStretch: null, growth: {x: 0, y: 0}};
-        this._trace(window, 'animate', {from, to, duration, style: 'morph',
+        this._trace(window, 'animate', {from, to, end, duration, style: 'morph',
             client: window.get_client_type?.() === Meta.WindowClientType.X11 ? 'x11' : 'wayland'});
         this._visuals.get(window)?.stopHold?.();
         actor.remove_all_transitions();
         this._exactUntil.delete(window);
-        // One request for the final size; nothing in between.
-        apply(to);
         return new Promise((resolve, reject) => {
             const timeline = new Clutter.Timeline({actor, duration});
             // Elapsed time when the live window began to fade in.
@@ -456,10 +467,10 @@ export default class KeyboardMonitorSnap extends Extension {
                     // The live window takes over; an unfinished fade completes
                     // on its own while the hold keeps the window on target.
                     actor.opacity = 255;
-                    this._showAt(window, actor, to, exact);
+                    this._showAt(window, actor, end, exact);
                     effects.dropCover(fadeFrom === null ? MORPH_FADE_MS
                         : Math.max(0, MORPH_FADE_MS-(elapsed-fadeFrom)));
-                    this._hold(window, actor, to, exact);
+                    this._hold(window, actor, end, exact);
                 } else if (!operation.superseded) {
                     this._clearVisual(window, false, actor);
                 }
@@ -468,11 +479,11 @@ export default class KeyboardMonitorSnap extends Extension {
             operation.cancelAnimation = () => finish(new Error('Placement cancelled'));
             timeline.connectObject('new-frame', () => {
                 const elapsed = timeline.get_elapsed_time();
-                const curve = interpolateRect(from, to, easeOutCubic(elapsed/duration));
+                const curve = interpolateRect(from, end, easeOutCubic(elapsed/duration));
                 cover.set_position(curve.x, curve.y);
                 cover.set_size(curve.width, curve.height);
                 const drawn = this._drawnFrame(window, actor).frame;
-                const ready = Math.abs(drawn.width-to.width) <= 3 && Math.abs(drawn.height-to.height) <= 3;
+                const ready = Math.abs(drawn.width-end.width) <= 3 && Math.abs(drawn.height-end.height) <= 3;
                 if (fadeFrom === null && (ready || elapsed >= MORPH_READY_LIMIT*duration))
                     fadeFrom = elapsed;
                 if (fadeFrom !== null) {
