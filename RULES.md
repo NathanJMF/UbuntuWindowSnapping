@@ -10,7 +10,7 @@ Only Super (Windows key) + the four arrow keys change. Mouse dragging, edge snap
 
 ## First arrow press
 
-A fresh sequence starts when the window has no tracked keyboard position, after manually moving/resizing a window, or after crossing a monitor boundary.
+A fresh sequence starts when the window has no tracked keyboard position, or after manually moving/resizing a window. A monitor crossing retains its destination entry-half position as tracked state.
 
 | Keys | Result |
 | --- | --- |
@@ -54,17 +54,26 @@ From a quarter, an opposite arrow first removes that axis's split, keeping the o
 
 A window must occupy the full half along the requested edge before it can cross monitors. From a quarter, pressing toward an occupied edge first removes the perpendicular split: bottom-right + Right becomes right half; bottom-right + Down becomes bottom half. This expansion happens whether or not there is a neighboring monitor. Only the next press from that half looks for a physically adjacent monitor in that direction. GNOME's monitor layout determines adjacency; no numbered-monitor assumption is made.
 
-If a monitor is present, move the window there and maximize it. Do not arrive as a half or quarter. Clear the keyboard position so the next arrow chooses a fresh half on the destination.
+If a monitor is present, move the window there and take the half nearest the monitor it came from:
+
+| Crossing direction | Arrival on destination |
+| --- | --- |
+| Right | Left half |
+| Left | Right half |
+| Down | Top half |
+| Up | Bottom half |
+
+Keep that entry half as the tracked position. Subsequent keys follow the same intermediate rules as any other half. For example, crossing Right lands left; another Right first goes full on that monitor, then another Right takes its right half. A perpendicular key immediately forms the corresponding quarter from the entry half.
 
 Examples:
 
-- Left, Left: left half, then maximize on the monitor to the left.
-- Right, Right: right half, then maximize on the monitor to the right.
-- Down, Down: bottom half, then maximize on the monitor below.
-- Up, Up: top half, then maximize on the monitor above.
-- Up, Left, Left, Left: top half, top-left quarter, left half, then maximize on the monitor to the left.
-- Left, Down, Down, Down: left half, bottom-left quarter, bottom half, then maximize on the monitor below.
-- Left, Left, Down: left half, maximize on the left monitor, then bottom half there.
+- Left, Left: left half, then right half of the monitor to the left.
+- Right, Right: right half, then left half of the monitor to the right.
+- Down, Down: bottom half, then top half of the monitor below.
+- Up, Up: top half, then bottom half of the monitor above.
+- Up, Left, Left, Left: top half, top-left quarter, left half, then right half of the monitor to the left.
+- Left, Down, Down, Down: left half, bottom-left quarter, bottom half, then top half of the monitor below.
+- Left, Left, Down: left half, right half of the left monitor, then bottom-right quarter there.
 
 Quarters always expand to a half first; only halves cross. Crossing never wraps from an outermost monitor to the other end of the layout.
 
@@ -77,7 +86,7 @@ Quarters always expand to a half first; only halves cross. Crossing never wraps 
 | Down | Keep current bottom half (a bottom quarter first expands to bottom half); never minimize |
 | Up | From top half, maximize on the current monitor (a top quarter first expands to top half) |
 
-Thus Up twice maximizes locally if there is no monitor above. If a monitor is above, it maximizes there instead.
+Thus Up twice maximizes locally if there is no monitor above. If a monitor is above, it arrives in that monitor's bottom half instead.
 
 ## Practical behaviour
 

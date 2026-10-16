@@ -92,4 +92,14 @@ function environment({monitor=2,minWidth=0,cancelAt=Infinity,resizeDelay=4,geome
  assert(e.events.indexOf('move-acked')<e.events.indexOf('maximize-request'),'maximize still waits for monitor and frame together');
  assert(stages.join(',')==='unmaximize,monitor-and-frame,maximize','each wait has an explicit diagnostic stage');
 }
+for (const [source,dest,target] of [
+ [2,0,{x:1080,y:249,width:1280,height:1355}],
+ [0,2,{x:540,y:32,width:540,height:1835}],
+]) {
+ const {e,w,waitFor}=environment({monitor:source,geometryAssignsMonitor:true,resizeDelay:20});
+ const result=await placeWindow(w,target,dest,{waitFor,both:3});
+ assert(w.monitor===dest&&sameFrame(result.frame,target),'cross-monitor half lands on the requested destination edge');
+ assert(!result.full&&!w.maximizedHorizontally&&!w.maximizedVertically,'cross-monitor half does not maximize');
+ assert(!e.events.includes('maximize-request'),'half arrival issues no native maximize request');
+}
 print(`PASS: ${assertions} delayed placement assertions`);

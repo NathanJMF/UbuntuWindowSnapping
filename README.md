@@ -10,7 +10,7 @@ Read [RULES.md](RULES.md) for the agreed behaviour. The project changes keyboard
 - `extension.js`: GNOME 50 shortcuts, per-window transactions, confirmed-frame state, and Tiling Assistant restore metadata. Does not patch mouse handlers or Tiling Assistant methods.
 - `placement.js`: ordered unmaximize, monitor transfer, resize, and maximize requests with confirmation between stages.
 - `schemas/`: the four shortcuts and saved previous bindings.
-- `tests/rules.test.js`: 113 assertions for the agreed behaviour.
+- `tests/rules.test.js`: 121 assertions for the agreed behaviour.
 - `tests/adapter.test.js`: regression checks against the actual extension source with mocked GNOME APIs (maximized windows, monitor crossing, per-window reset and cleanup).
 - `install.sh`: test, compile schemas, install locally, retire the old patch, enable for login.
 - `uninstall.sh`: disable this extension and restore previous keyboard bindings. The popup stays disabled.
@@ -54,7 +54,7 @@ gjs -m tests/placement.test.js
 glib-compile-schemas --strict schemas
 ```
 
-The pure engine and adapter mock tests pass (177 assertions total). Live keyboard behaviour must be verified after GNOME loads the extension at login; unit tests cannot establish Mutter's actual resizing behaviour.
+The pure engine and adapter mock tests pass (195 assertions total). Live keyboard behaviour must be verified after GNOME loads the extension at login; unit tests cannot establish Mutter's actual resizing behaviour.
 
 ## Disable / rollback
 
@@ -123,3 +123,9 @@ An opposite arrow from a quarter now removes that split first, preserving the ot
 Animation preference update: GNOME desktop animations and Tiling Assistant tile/untile animations were restored to enabled. Earlier animation-disable notes above describe historical troubleshooting.
 
 Version 5 validation: 177 checks (113 rules, 32 adapter, 32 delayed placement); independent review returned no findings.
+
+## Entry-half monitor arrivals (version 6)
+
+Crossing Right arrives on the destination's left half; Left arrives on its right half; Down on its top half; Up on its bottom half. Entry halves remain tracked, so existing opposite-half intermediate steps and perpendicular quarter combinations apply immediately. Outward quarters still expand to a full side before crossing. Native geometry placement/confirmation is unchanged, and the monitor-arrival half is applied without a native maximize request.
+
+Version 6 validation: 195 checks (121 rules, 32 adapter, 42 delayed placement).

@@ -5,6 +5,11 @@ function equal(actual, expected, name) {
     if (JSON.stringify(actual) !== JSON.stringify(expected))
         throw new Error(`${name}: got ${JSON.stringify(actual)}, expected ${JSON.stringify(expected)}`);
 }
+function entryHalf(direction) {
+    const layout={...FULL};
+    layout[['left','right'].includes(direction)?'x':'y']={left:'right',right:'left',up:'down',down:'up'}[direction];
+    return layout;
+}
 function sequence(keys, neighbor = () => false) {
     let state = {...FULL};
     const results = [];
@@ -19,7 +24,9 @@ for (const d of ['left', 'right', 'up', 'down']) {
     const expected = {x: null, y: null};
     expected[['left','right'].includes(d) ? 'x' : 'y'] = d;
     equal(sequence([d])[0], {layout: expected, cross: null}, `${d} starts at half`);
-    equal(sequence([d,d], () => true)[1], {layout: {...FULL}, cross: d}, `${d} crossing arrives full`);
+    equal(sequence([d,d], () => true)[1], {layout: entryHalf(d), cross: d}, `${d} crossing arrives on entry half`);
+    equal(sequence([d,d,d],()=>true)[2],{layout:{...FULL},cross:null},`${d} after entry half passes through local full`);
+    equal(sequence([d,d,d,d],()=>true)[3],{layout:expected,cross:null},`${d} next chooses outward half without another crossing`);
     equal(sequence([d,d])[1].layout, d === 'up' ? {...FULL} : expected, `${d} outer boundary`);
 }
 for (const x of ['left','right']) {
@@ -32,13 +39,13 @@ for (const x of ['left','right']) {
             half[['left','right'].includes(d) ? 'x' : 'y'] = d;
             equal(step(quarter,d,true), {layout: half, cross:null}, `quarter ${x}/${y} expands before ${d} crossing`);
             equal(step(quarter,d,false), {layout: half, cross:null}, `quarter ${x}/${y} expands at ${d} boundary`);
-            equal(step(half,d,true), {layout: {...FULL}, cross:d}, `expanded half then crosses ${d}`);
+            equal(step(half,d,true), {layout: entryHalf(d), cross:d}, `expanded half then crosses ${d}`);
             equal(step(half,d,false).layout, d === 'up' ? {...FULL} : half, `expanded half ${d} boundary`);
         }
     }
 }
 const crossing = sequence(['left','left','down'], d => d === 'left');
-equal(crossing[2].layout, {x:null,y:'down'}, 'new monitor starts a fresh half sequence');
+equal(crossing[2].layout, {x:'right',y:'down'}, 'entry half remains tracked for perpendicular quarter snapping');
 equal(sequence(['left','right'])[1].layout, {...FULL}, 'left half then Right restores full');
 equal(sequence(['up','down'])[1].layout, {...FULL}, 'top half then Down restores full');
 for (const [first,opposite] of [['left','right'],['right','left'],['up','down'],['down','up']]) {

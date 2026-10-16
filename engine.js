@@ -13,8 +13,11 @@ export function step(layout, direction, hasNeighbor) {
             next[perpendicular] = null;
             return {layout: next, cross: null};
         }
-        if (hasNeighbor)
-            return {layout: {...FULL}, cross: direction};
+        if (hasNeighbor) {
+            const entry = {...FULL};
+            entry[axis] = {left:'right',right:'left',up:'down',down:'up'}[direction];
+            return {layout: entry, cross: direction};
+        }
         if (direction === 'up')
             return {layout: {...FULL}, cross: null};
         return {layout: next, cross: null};
