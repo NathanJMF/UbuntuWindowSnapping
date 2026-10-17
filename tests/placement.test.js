@@ -1,4 +1,5 @@
-import {placeWindow,sameFrame,interpolateRect,travelDuration,visualTransform,easeOutCubic,easeInOutCubic,anchorFor} from '../placement.js';
+import {placeWindow} from '../placement.js';
+import {sameFrame,interpolateRect,travelDuration,visualTransform,easeOutCubic,easeInOutCubic,anchorFor} from '../geometry.js';
 let assertions=0;
 function assert(value,message){assertions++;if(!value)throw new Error(message);}
 function environment({monitor=2,minWidth=0,cancelAt=Infinity,resizeDelay=4,geometryAssignsMonitor=false}={}) {

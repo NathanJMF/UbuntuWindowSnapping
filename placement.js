@@ -1,71 +1,14 @@
-// Explicit placement sequence: native Wayland requests are asynchronous.
-export function sameFrame(a, b, tolerance = 3) {
-    return Boolean(a && b) && ['x','y','width','height'].every(k => Math.abs(a[k]-b[k]) <= tolerance);
-}
-export function frameCopy(r) {
-    return {x:r.x, y:r.y, width:r.width, height:r.height};
-}
+// One placement: unmaximize, animate, set and confirm the final geometry,
+// maximize. Native Wayland requests are asynchronous, so each stage waits
+// for Mutter to confirm the previous one.
+import {sameFrame, rect as frameCopy} from './geometry.js';
+
 function centeredIn(frame, area) {
     const cx = frame.x + frame.width/2, cy = frame.y + frame.height/2;
     return cx >= area.x && cx < area.x+area.width && cy >= area.y && cy < area.y+area.height;
 }
-// Eased intermediate frame between two rectangles (t from 0 to 1).
-export function interpolateRect(from, to, t) {
-    const at = k => Math.round(from[k] + (to[k]-from[k]) * t);
-    return {x:at('x'), y:at('y'), width:at('width'), height:at('height')};
-}
-// Animation curve (ease-out cubic). Evaluated directly, not by the timeline,
-// so the same curve can be sampled ahead of the current time.
-export function easeOutCubic(t) {
-    const x = Math.min(1, Math.max(0, t));
-    return 1 - (1-x)**3;
-}
-// Gentle-start curve for growing reveal moves: little happens in the first
-// frames, before the app has drawn anything at the new size.
-export function easeInOutCubic(t) {
-    const x = Math.min(1, Math.max(0, t));
-    return x < 0.5 ? 4*x**3 : 1 - (-2*x+2)**3/2;
-}
-// Per axis, which point of the window stays put: 0 = start edge, 1 = end
-// edge, 0.5 = centre (both edges move, e.g. across monitors).
-export function anchorFor(from, to) {
-    // 1 px tolerance: an interrupted motion starts from a rounded rectangle.
-    const axis = (start, size) => {
-        if (Math.abs(from[start]-to[start]) <= 1) return 0;
-        if (Math.abs(from[start]+from[size]-to[start]-to[size]) <= 1) return 1;
-        return 0.5;
-    };
-    return {x: axis('x', 'width'), y: axis('y', 'height')};
-}
-// Actor transform that shows a window whose real frame is `frame` (inside
-// its buffer rect, where the actor sits) exactly at the on-screen rectangle
-// `visual`, with the anchor point (0 start edge, 1 end edge, 0.5 centre)
-// fixed. Scaling pivots at the actor origin, as in GNOME's own effects.
-// Returns the transform and the rectangle drawn.
-export function visualTransform(frame, buffer, visual, anchor = {x:0, y:0}) {
-    const axis = (start, size, a) => {
-        const scale = frame[size] > 0 ? visual[size] / frame[size] : 1;
-        const target = visual[start] + a*visual[size];
-        const local = frame[start] - buffer[start] + a*frame[size];
-        const drawnSize = frame[size]*scale;
-        return {scale, translation: target - buffer[start] - local*scale, drawn: target - a*drawnSize, drawnSize};
-    };
-    const x = axis('x', 'width', anchor.x);
-    const y = axis('y', 'height', anchor.y);
-    return {
-        scale_x: x.scale, scale_y: y.scale, translation_x: x.translation, translation_y: y.translation,
-        drawn: {x: x.drawn, y: y.drawn, width: x.drawnSize, height: y.drawnSize},
-    };
-}
-// Longer moves take a little longer: the largest edge travel, relative to
-// 1000 px, scales the base length by its square root within [0.75, 1.35].
-export function travelDuration(base, from, to) {
-    const travel = Math.max(Math.abs(from.x-to.x), Math.abs(from.y-to.y),
-        Math.abs(from.x+from.width-to.x-to.width), Math.abs(from.y+from.height-to.y-to.height));
-    return Math.round(base * Math.min(1.35, Math.max(0.75, Math.sqrt(travel/1000))));
-}
-// animate(from, to, apply) drives real frame changes so the client redraws
-// at every intermediate size. effects hides native maximize transitions.
+// animate(from, to, apply) runs the animation; apply requests a frame.
+// effects: snapshot, native-effect skips and the maximize cover.
 // monitorExists(index) guards every call that takes a monitor index: Mutter
 // aborts on an index that no longer exists (monitor unplugged mid-placement).
 export async function placeWindow(window, target, monitor, {waitFor, both, constrain, clearConstraints,

@@ -4,7 +4,7 @@
 // clients draw requested sizes after a set latency (and can re-lay out,
 // have minimum sizes, or redraw constantly).
 import GLib from 'gi://GLib';
-import {anchorFor} from '../placement.js';
+import {anchorFor} from '../geometry.js';
 import {mock, signals, Main} from './support/gnome.js';
 import {loadExtension} from './support/load.js';
 let count = 0;

@@ -11,45 +11,22 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {TilingWindowManager as Twm} from 'file:///usr/share/gnome-shell/extensions/tiling-assistant@ubuntu.com/src/extension/tilingWindowManager.js';
 import {Rect} from 'file:///usr/share/gnome-shell/extensions/tiling-assistant@ubuntu.com/src/extension/utility.js';
 import {FULL, step, rectangle} from './engine.js';
-import {placeWindow, sameFrame, interpolateRect, travelDuration, visualTransform,
-    easeOutCubic, easeInOutCubic, anchorFor} from './placement.js';
+import {placeWindow} from './placement.js';
+import {sameFrame, sameSize, rect, travelDuration, visualTransform, EasedPath} from './geometry.js';
+import {Handover, QUIET_MS} from './handover.js';
+import {FOLLOW_WINDOW_MS, followUpDelay, learnFollowUp} from './follow-up.js';
+import {contentAnchor, snapshotLayout, revealedWindowLayout} from './layers.js';
 
 const UUID = 'tiling-assistant@ubuntu.com';
-const rect = r => ({x: r.x, y: r.y, width: r.width, height: r.height});
-// Start position of something `size` long whose anchor point (0 start edge,
-// 1 end edge, 0.5 centre) lines up with that point of the span start..size.
-const alignOn = (size, start, span, anchor) => start + anchor*span - anchor*size;
+// Apply a snapshotLayout() to a snapshot widget.
+function placeWidget(widget, layout) {
+    widget.set_position(layout.x, layout.y);
+    widget.set_size(layout.width, layout.height);
+    widget.set_clip(layout.clip.x, layout.clip.y, layout.clip.width, layout.clip.height);
+}
 // Animation length before travel scaling (see travelDuration) and GNOME's
 // slow-down factor; GNOME's "animations off" switch disables it.
 const ANIMATION_MS = 120;
-// Handover from the snapshot to the live window: the crossfade lasts up to
-// FADE_MS but always ends by FADE_END of the motion (never shorter than
-// MIN_FADE_MS), so the snapshot never lingers over a window that has landed.
-// Without a confirmed final layout the handover happens at READY_LIMIT of
-// the motion anyway (minimum-size and very slow apps).
-const FADE_MS = 70;
-const MIN_FADE_MS = 16;
-const FADE_END = 0.9;
-const READY_LIMIT = 0.6;
-// Chromium-based apps often present their first frame at a new size with
-// the old layout, then re-lay out a frame or two later. The handover waits
-// until the app has drawn the final size and then nothing new for this long.
-const QUIET_MS = 24;
-// Some apps (Claude desktop) draw a follow-up frame about 40-55 ms after
-// their first frame at a new size, with the corrected layout. The delay is
-// learned per window as the FOLLOW_PERCENTILE of its last FOLLOW_SAMPLES
-// samples (no follow-up counts as 0); follow-ups up to FOLLOW_WINDOW_MS
-// after the first frame count. A window known to draw one (learned delay of
-// at least FOLLOW_MIN_MS) is handed over only after that delay (capped at
-// FOLLOW_CAP_MS) plus FOLLOW_QUIET_MS without drawing, and its fallback
-// handover moves to FOLLOW_READY_LIMIT of the motion.
-const FOLLOW_WINDOW_MS = 80;
-const FOLLOW_SAMPLES = 12;
-const FOLLOW_PERCENTILE = 0.75;
-const FOLLOW_MIN_MS = 10;
-const FOLLOW_CAP_MS = 60;
-const FOLLOW_QUIET_MS = 8;
-const FOLLOW_READY_LIMIT = 0.75;
 // A re-aimed animation glides its end point to the new target over this long
 // (eased at both ends), so neither position nor speed jumps.
 const REAIM_MS = 40;
@@ -335,13 +312,11 @@ export default class KeyboardMonitorSnap extends Extension {
         const cover = effects.snapshot();
         if (!base || !actor || !cover)
             return Promise.resolve();
-        const duration = travelDuration(base, from, to);
-        // Attach content to the edge that stays put, or to the top-left
-        // (where apps lay out) when both edges move.
-        const fixed = anchorFor(from, to);
-        const anchor = {x: fixed.x === 0.5 ? 0 : fixed.x, y: fixed.y === 0.5 ? 0 : fixed.y};
-        this._trace(window, 'animate', {from, to, duration,
-            followUp: Math.round(this._followUp.get(window) ?? 0),
+        const path = new EasedPath(from, to, travelDuration(base, from, to));
+        const anchor = contentAnchor(from, to);
+        const growing = path.growing;
+        const followUp = this._followUp.get(window) ?? 0;
+        this._trace(window, 'animate', {from, to, duration: path.duration, followUp: Math.round(followUp),
             client: window.get_client_type?.() === Meta.WindowClientType.X11 ? 'x11' : 'wayland'});
         this._visuals.get(window)?.stopHold?.();
         actor.remove_all_transitions();
@@ -349,14 +324,6 @@ export default class KeyboardMonitorSnap extends Extension {
         const startSize = this._drawnFrame(window, actor).frame;
         // The snapshot's own size, before any scaling.
         const natural = {width: cover.width, height: cover.height};
-        const growX = to.width > from.width+3;
-        const growY = to.height > from.height+3;
-        const growing = growX || growY;
-        // Each direction eases on its own: a growing one starts gently
-        // (little to fill before the app has drawn), a shrinking one settles
-        // quickly (so a mixed move's uncovered strip goes fast).
-        const easeX = growX ? easeInOutCubic : easeOutCubic;
-        const easeY = growY ? easeInOutCubic : easeOutCubic;
         let backdrop = null;
         if (growing) {
             global.window_group.set_child_above_sibling(cover, actor);
@@ -368,40 +335,13 @@ export default class KeyboardMonitorSnap extends Extension {
         // One request for the final size; nothing in between.
         apply(to);
         return new Promise((resolve, reject) => {
-            const timeline = new Clutter.Timeline({actor, duration});
-            // The curve eases from `from` towards an end point. A re-aim
-            // glides that end point from its current value to the new target
-            // (smoothstep, finishing before the motion does), so the window's
-            // position and speed both stay continuous.
-            let end = to;
-            let glide = null;
-            const smoothstep = u => u <= 0 ? 0 : u >= 1 ? 1 : u*u*(3-2*u);
-            const endAt = elapsed => glide
-                ? interpolateRect(glide.from, end, smoothstep((elapsed-glide.at)/glide.ms)) : end;
-            const curveAt = elapsed => {
-                const target = endAt(elapsed);
-                const t = elapsed/duration;
-                const along = (start, size, eased) => [Math.round(from[start]+(target[start]-from[start])*eased),
-                    Math.round(from[size]+(target[size]-from[size])*eased)];
-                const [x, width] = along('x', 'width', easeX(t));
-                const [y, height] = along('y', 'height', easeY(t));
-                return {x, y, width, height};
-            };
-            // Elapsed time when the handover began, and how long its fade lasts.
-            let fadeFrom = null;
-            let fadeMs = FADE_MS;
+            const timeline = new Clutter.Timeline({actor, duration: path.duration});
+            const handover = new Handover(path.duration, followUp);
             // When the app last drew anything (the snapshot counts as drawn),
-            // when it first drew the final size, and every draw since.
+            // and every draw since the animation began.
             let lastDamage = GLib.get_monotonic_time();
-            let sizedAt = null;
             const draws = [];
-            // Learned follow-up delay for this window (see MORPH_FOLLOW_*).
-            const followUp = this._followUp.get(window) ?? 0;
-            const follows = followUp >= FOLLOW_MIN_MS;
-            const followWait = Math.min(followUp, FOLLOW_CAP_MS);
-            const readyLimit = follows ? FOLLOW_READY_LIMIT : READY_LIMIT;
             let finished = false;
-            const sameSize = (a, b) => Math.abs(a.width-b.width) <= 3 && Math.abs(a.height-b.height) <= 3;
             // Mutter's frame, once the app has acknowledged the request, is
             // the size it was granted (e.g. widened to a minimum width). Only
             // trusted on the requested edges, and only if at least the
@@ -415,14 +355,6 @@ export default class KeyboardMonitorSnap extends Extension {
                 return g.width >= to.width-3 && g.height >= to.height-3 &&
                     aligned('x', 'width') && aligned('y', 'height') ? g : null;
             };
-            const reaim = (elapsed, target, why) => {
-                const current = endAt(elapsed);
-                glide = {from: current, at: elapsed,
-                    ms: Math.max(1, Math.min(REAIM_MS, duration-elapsed))};
-                end = target;
-                sizedAt = null;
-                this._trace(window, 'reaim', {why, elapsed, from:current, to:target});
-            };
             const finish = error => {
                 if (finished) return;
                 finished = true;
@@ -433,7 +365,7 @@ export default class KeyboardMonitorSnap extends Extension {
                 const elapsed = timeline.get_elapsed_time();
                 timeline.stop();
                 this._repaintCrossing(operation, true);
-                this._observeFollowUp(window, actor, sizedAt, draws, from, to);
+                this._observeFollowUp(window, actor, handover.sizedAt, draws, from, to);
                 if (!error) {
                     // The live window takes over at its final size; a growing
                     // move's unfinished fade completes on its own (a shrinking
@@ -441,11 +373,10 @@ export default class KeyboardMonitorSnap extends Extension {
                     // while the hold keeps the window on target.
                     actor.opacity = 255;
                     actor.remove_clip?.();
-                    this._showAt(window, actor, end, anchor);
+                    this._showAt(window, actor, path.end, anchor);
                     effects.dropBackdrop();
-                    effects.dropCover(!growing ? 0 : fadeFrom === null ? MIN_FADE_MS
-                        : Math.max(0, fadeMs-(elapsed-fadeFrom)));
-                    this._hold(window, actor, end, anchor);
+                    effects.dropCover(growing ? handover.remaining(elapsed) : 0);
+                    this._hold(window, actor, path.end, anchor);
                 } else if (!operation.superseded) {
                     this._clearVisual(window, false, actor);
                 }
@@ -457,74 +388,52 @@ export default class KeyboardMonitorSnap extends Extension {
                 this._repaintCrossing(operation);
                 const elapsed = timeline.get_elapsed_time();
                 const drawn = this._drawnFrame(window, actor).frame;
-                const late = elapsed >= readyLimit*duration;
                 // Re-aim at the size the app really takes, once it has drawn a
                 // new size that Mutter confirms. Mutter's frame alone cannot
                 // tell "not answered yet" from "answered with the old size",
                 // so an app that never visibly resizes is not re-aimed.
-                if (fadeFrom === null && !sameSize(drawn, end) && !sameSize(drawn, startSize)) {
+                if (!handover.started && !sameSize(drawn, path.end) && !sameSize(drawn, startSize)) {
                     const g = granted();
-                    if (g && sameSize(drawn, g) && !sameSize(g, end))
-                        reaim(elapsed, g, 'drawn');
+                    if (g && sameSize(drawn, g) && !sameSize(g, path.end)) {
+                        const was = path.retarget(elapsed, g, REAIM_MS);
+                        handover.resetSized();
+                        this._trace(window, 'reaim', {why: 'drawn', elapsed, from: was, to: g});
+                    }
                 }
-                const curve = curveAt(elapsed);
-                const align = (width, height) => ({x: alignOn(width, curve.x, curve.width, anchor.x),
-                    y: alignOn(height, curve.y, curve.height, anchor.y)});
-                const fit = (widget, width, height) => {
-                    const at = align(width, height);
-                    widget.set_position(at.x, at.y);
-                    widget.set_size(width, height);
-                    widget.set_clip(curve.x-at.x, curve.y-at.y, curve.width, curve.height);
-                };
+                const outline = path.at(elapsed);
                 if (growing) {
-                    // Top: the old snapshot at its own size. Bottom: the same
-                    // image stretched to fill the outline, seen only where
-                    // neither crisp image reaches (a mixed move's corner).
-                    fit(cover, natural.width, natural.height);
+                    placeWidget(cover, snapshotLayout(outline, natural, anchor, false));
                     if (backdrop)
-                        fit(backdrop, Math.max(natural.width, curve.width), Math.max(natural.height, curve.height));
+                        placeWidget(backdrop, snapshotLayout(outline, natural, anchor, true));
                 } else {
-                    // Shrinking: the snapshot is at least the outline's size.
-                    fit(cover, Math.max(natural.width, curve.width), Math.max(natural.height, curve.height));
+                    placeWidget(cover, snapshotLayout(outline, natural, anchor, true));
                 }
-                const sized = sameSize(drawn, end);
-                if (sized && sizedAt === null)
-                    sizedAt = lastDamage;
-                // Hand over once the content is final: after the learned
-                // follow-up frame for windows that draw one, otherwise after
-                // QUIET_MS without drawing.
-                const ready = sized && (follows
-                    ? now-sizedAt >= (followWait+FOLLOW_QUIET_MS)*1000 &&
-                      now-lastDamage >= FOLLOW_QUIET_MS*1000
-                    : now-lastDamage >= QUIET_MS*1000);
-                if (fadeFrom === null && (ready || late)) {
-                    fadeFrom = elapsed;
-                    fadeMs = Math.max(MIN_FADE_MS, Math.min(FADE_MS, FADE_END*duration-elapsed));
-                }
+                const fade = handover.update({elapsed, now, sized: sameSize(drawn, path.end), lastDamage});
                 if (growing) {
                     // Live window underneath at its true size throughout;
                     // the snapshot on top fades out from the handover.
-                    this._showRevealed(window, actor, curve, anchor);
-                    if (fadeFrom !== null)
-                        cover.opacity = Math.round(255*(1-Math.min(1, (elapsed-fadeFrom)/fadeMs)));
-                } else if (fadeFrom !== null) {
+                    this._showRevealed(window, actor, outline, anchor);
+                    if (fade !== null)
+                        cover.opacity = Math.round(255*(1-fade));
+                } else if (fade !== null) {
                     // The live window fades in on top, unscaled and cropped;
                     // the snapshot underneath stays until the motion ends.
-                    actor.opacity = Math.round(255*Math.min(1, (elapsed-fadeFrom)/fadeMs));
-                    this._showRevealed(window, actor, curve, anchor);
+                    actor.opacity = Math.round(255*fade);
+                    this._showRevealed(window, actor, outline, anchor);
                 } else {
                     // Still covered: remember what is on screen for interruptions.
                     const visual = this._visuals.get(window) ?? {};
-                    visual.rect = curve;
+                    visual.rect = outline;
                     this._visuals.set(window, visual);
                 }
                 if (this._settings.get_boolean('debug-logging'))
-                    console.log(`${this.uuid}: FRAME ${JSON.stringify({id:window.get_id(), elapsed,
-                        curve, end, drawn, mutter:rect(window.get_frame_rect()), sized, ready, fadeFrom,
-                        sinceDamage:Math.round((now-lastDamage)/1000), cover:cover.opacity, fadeMs, followUp,
-                        sinceSized:sizedAt === null ? null : Math.round((now-sizedAt)/1000), growing, anchor,
-                        cost:GLib.get_monotonic_time()-now,
-                        scale:[actor.scale_x, actor.scale_y].map(v => Math.round(v*1000)/1000)})}`);
+                    console.log(`${this.uuid}: FRAME ${JSON.stringify({id: window.get_id(), elapsed,
+                        curve: outline, end: path.end, drawn, mutter: rect(window.get_frame_rect()),
+                        sized: handover.sizedAt !== null, ready: handover.ready, fadeFrom: handover.fadeFrom,
+                        fadeMs: handover.fadeMs, sinceDamage: Math.round((now-lastDamage)/1000), cover: cover.opacity,
+                        followUp, sinceSized: handover.sizedAt === null ? null : Math.round((now-handover.sizedAt)/1000),
+                        growing, anchor, cost: GLib.get_monotonic_time()-now,
+                        scale: [actor.scale_x, actor.scale_y].map(v => Math.round(v*1000)/1000)})}`);
             }, 'completed', () => finish(), this);
             actor.connectObject('destroy', () => operation.cancel(),
                 'damaged', () => {
@@ -586,30 +495,13 @@ export default class KeyboardMonitorSnap extends Extension {
     _learnFollowUp(window, sizedAt, draws, from, to, complete) {
         if (sizedAt === null || (from.width === to.width && from.height === to.height))
             return;
-        let follow = null;
-        let burst = null;
-        for (const at of draws) {
-            if (at <= sizedAt+1000)
-                continue;
-            if (burst === null || at-burst.last > 3000)
-                burst = {start: at};
-            burst.last = at;
-            const delay = (burst.start-sizedAt)/1000;
-            if (delay <= FOLLOW_WINDOW_MS)
-                follow = delay;
-        }
-        if (follow === null && !complete)
+        const delay = followUpDelay(sizedAt, draws, complete);
+        if (delay === null)
             return;
-        follow ??= 0;
         const samples = this._followSamples.get(window) ?? [];
-        samples.push(follow);
-        if (samples.length > FOLLOW_SAMPLES)
-            samples.shift();
         this._followSamples.set(window, samples);
-        const sorted = [...samples].sort((a, b) => a-b);
-        this._followUp.set(window, sorted[Math.min(sorted.length-1,
-            Math.floor(FOLLOW_PERCENTILE*sorted.length))]);
-        this._trace(window, 'follow-up', {sample: Math.round(follow), learned: Math.round(this._followUp.get(window))});
+        this._followUp.set(window, learnFollowUp(samples, delay));
+        this._trace(window, 'follow-up', {sample: Math.round(delay), learned: Math.round(this._followUp.get(window))});
     }
     // Repaint the whole window layer (it includes the backgrounds, so it spans
     // every monitor) during a crossing. At the end, once more a frame later,
@@ -659,20 +551,17 @@ export default class KeyboardMonitorSnap extends Extension {
     }
     // Show the live window unscaled, its drawn frame aligned to `rect` at the
     // anchor (the edge that does not move), cropped to `rect`.
-    _showRevealed(window, actor, rect, anchor) {
+    _showRevealed(window, actor, outline, anchor) {
         const {frame} = this._drawnFrame(window, actor);
-        const x = alignOn(frame.width, rect.x, rect.width, anchor.x);
-        const y = alignOn(frame.height, rect.y, rect.height, anchor.y);
+        const layout = revealedWindowLayout(frame, {x: actor.x, y: actor.y}, outline, anchor);
         actor.set_pivot_point(0, 0);
         actor.scale_x = 1;
         actor.scale_y = 1;
-        actor.translation_x = x-frame.x;
-        actor.translation_y = y-frame.y;
-        // The clip is in the actor's own (untransformed) coordinates.
-        actor.set_clip(rect.x-actor.x-actor.translation_x, rect.y-actor.y-actor.translation_y,
-            rect.width, rect.height);
+        actor.translation_x = layout.translationX;
+        actor.translation_y = layout.translationY;
+        actor.set_clip(layout.clip.x, layout.clip.y, layout.clip.width, layout.clip.height);
         const visual = this._visuals.get(window) ?? {};
-        visual.rect = {...rect};
+        visual.rect = {...outline};
         this._visuals.set(window, visual);
     }
     // Draw the window actor so its current real frame appears exactly at

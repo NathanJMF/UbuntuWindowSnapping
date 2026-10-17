@@ -7,9 +7,10 @@ gjs -m "$base/tests/rules.test.js"
 gjs -m "$base/tests/adapter.test.js"
 gjs -m "$base/tests/placement.test.js"
 gjs -m "$base/tests/lifecycle.test.js"
+gjs -m "$base/tests/units.test.js"
 glib-compile-schemas --strict "$base/schemas"
 mkdir -p "$dest/schemas"
-cp "$base/metadata.json" "$base/extension.js" "$base/engine.js" "$base/placement.js" "$dest/"
+cp "$base/metadata.json" "$base/"*.js "$dest/"
 cp "$base/schemas/"* "$dest/schemas/"
 # The old experimental patch must never be active alongside this extension.
 gnome-extensions disable windows-monitor-snap@local 2>/dev/null || true
