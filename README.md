@@ -344,3 +344,22 @@ The follow-up delay is now learned per window:
 The first snap of a new window still learns, so its handover can precede the follow-up.
 
 Validation: 607 checks (121 rules, 77 adapter, 79 delayed placement, 330 lifecycle). Each learning behaviour was mutation-checked: learning, cap, asymmetric decay, ignoring maximize redraws, observing past the motion, and the 75% fallback.
+
+## Typical follow-up and reveal style (version 25, experiment/animations branch)
+
+**Follow-up estimate.** Version 24's estimate rose to any slow sample and drifted to 66 ms for Claude, so its handovers mostly fell back to 75% of the motion, with short (~20 ms) crossfades. The learned delay is now the 75th percentile of the window's last 12 samples (no follow-up counts as 0). One slow or missing follow-up barely moves it, and for Claude it settles near its typical ~45–50 ms.
+
+**Reveal style.** In the morph style the snapshot is scaled to the moving outline, so content visibly stretches or squishes, and the switch to the real layout pops near the end. `animation-style` now also accepts `reveal`. It shares everything with morph (snapshot, single request, re-aim, learned handover, maximize cover) except how content is drawn:
+
+- The snapshot sits under the window and is never scaled down. Along an axis where it is larger than the outline it is cropped by the moving edge; along one where it is smaller (a growing window before the app has drawn) it stretches to fill.
+- After the handover the live window fades in on top at its true size, its fixed edge aligned with the outline's, cropped to the outline. Where it is smaller (a shrinking window), the snapshot shows in the remaining strip.
+- Clips are removed when a motion ends, is interrupted, or the window closes.
+
+Switch live (no relog):
+
+```bash
+GSETTINGS_SCHEMA_DIR="$PWD/schemas" gsettings set org.gnome.shell.extensions.keyboard-monitor-snap animation-style reveal
+GSETTINGS_SCHEMA_DIR="$PWD/schemas" gsettings set org.gnome.shell.extensions.keyboard-monitor-snap animation-style morph
+```
+
+Validation: 684 checks (121 rules, 77 adapter, 79 delayed placement, 407 lifecycle). Reveal and the estimator were mutation-checked: squished snapshot, scaled or uncropped live window, clip left after the motion, snapshot above the window, slowest-sample estimate.

@@ -55,6 +55,7 @@ const St = {Settings:{get:() => ({enable_animations:true, slow_down_factor:1})},
   constructor() {this.opacity = 255; this.destroyed = false; this.moves = []; mock.widgets.push(this);}
   set_position(x, y) {this.x = x; this.y = y;}
   set_size(width, height) {this.width = width; this.height = height; this.moves.push({x:this.x, y:this.y, width, height});}
+  set_clip(x, y, width, height) {this.clip = {x, y, width, height};}
   ease(p) {if ('opacity' in p) this.opacity = p.opacity; p.onStopped?.();}
   destroy() {this.destroyed = true; this.opacityAtDestroy = this.opacity;}
  }};
@@ -78,7 +79,8 @@ const Main = {layoutManager:signals({}), extensionManager:{lookup:() => ({stateO
 class Rect {constructor(r) {Object.assign(this, r);}}
 const Twm = {clearTilingProps() {}, updateTileGroup() {}, saveTileState() {},
  isMaximized:w => w.maximizedHorizontally && w.maximizedVertically};
-globalThis.global = {window_manager:signals({}), window_group:{add_child() {}, set_child_above_sibling() {}},
+globalThis.global = {window_manager:signals({}), window_group:{add_child() {}, set_child_above_sibling(a) {a.below = false;},
+  set_child_below_sibling(a) {a.below = true;}},
  display:{get focus_window() {return mock.focus;}, get_monitor_neighbor_index:() => mock.neighbor,
   get_n_monitors:() => mock.monitors,
   connect:(n, cb) => {mock.grab = cb; return 1;}, disconnect() {}}};
@@ -114,6 +116,7 @@ function makeWindow({frame = {x:100, y:100, width:600, height:400}, lag = 40, ma
         frame:{...frame}, drawn:{...frame}, queue:[], requests:[], unmanaged:false, resizable:true});
     w.actor = signals({opacity:255, scale_x:1, scale_y:1, translation_x:0, translation_y:0,
         set_pivot_point() {}, remove_all_transitions() {}, paint_to_content:() => ({}),
+        clip:null, set_clip(x, y, width, height) {this.clip = {x, y, width, height};}, remove_clip() {this.clip = null;},
         ease(p) {
             const keys = ['scale_x','scale_y','translation_x','translation_y'].filter(k => k in p);
             if (mock.halfEase) {for (const k of keys) this[k] = (this[k]+p[k])/2; return;}
@@ -277,6 +280,7 @@ const clean = (w, label, {busy = true} = {}) => {
     assert(w._h.length === 0, `${label}: no window signal handlers left`);
     if (busy)
         assert(!e._busy.has(w), `${label}: window not busy`);
+    assert(!w.actor.clip, `${label}: no clip left on the window`);
 };
 const fresh = opts => {
     const w = makeWindow(opts);
@@ -989,11 +993,15 @@ for (const [opts, label] of [[{quietMaximize:true}, 'no redraw'], [{lateMaximize
     clean(w, 'learned follow-up');
 
     // One snap without a follow-up (left half -> Down -> bottom-left quarter,
-    // no maximize to cut the observation short) only nudges it down.
+    // no maximize to cut the observation short) barely moves the estimate,
+    // and one unusually slow follow-up does not drag it up either.
     const before = e._followUp.get(w);
     await watchMorph(w, 'down', {stepMs:2, steps:140});
     const after = e._followUp.get(w);
-    assert(after < before && after > before*0.7, `estimate decays slowly (${before} -> ${after})`);
+    assert(after >= before*0.9 && e._followSamples.get(w).at(-1) === 0, `a missing follow-up barely moves it (${before} -> ${after})`);
+    e._followSamples.set(w, [44, 43, 45, 44, 42, 46, 43, 44, 45, 43]);
+    e._learnFollowUp(w, mock.clock*1 - 70000, [mock.clock - 70000 + 76000], {width:500, height:800}, {width:1000, height:800}, true);
+    assert(e._followUp.get(w) <= 46, `one slow follow-up does not drag the estimate up (${e._followUp.get(w)})`);
     clean(w, 'follow-up decay');
 }
 
@@ -1046,6 +1054,94 @@ for (const [opts, label] of [[{quietMaximize:true}, 'no redraw'], [{lateMaximize
         `handover capped at 60 + 8 ms after the first frame (${runs.map(r => r.afterSized)})`);
     w.relayout = 0;
     clean(w, 'follow-up cap');
+}
+
+// ---- Reveal style ----
+// Sample every frame: the snapshot's size and clip, and where and how the
+// live window is drawn (unscaled, cropped) once it is visible.
+async function watchReveal(w, dir, steps = 120) {
+    mock.widgets = [];
+    const frames = [];
+    const p = press(dir);
+    for (let i = 0; i < steps; i++) {
+        await step(2);
+        const snap = mock.widgets[0];
+        if (!snap || snap.destroyed) continue;
+        const a = w.actor;
+        frames.push({snap:{width:snap.width, height:snap.height, clip:snap.clip && {...snap.clip}, below:snap.below},
+            visible:a.opacity > 0, scale:[a.scale_x, a.scale_y], clip:a.clip && {...a.clip},
+            left:w.drawn.x+a.translation_x, curve:e._visuals.get(w)?.rect && {...e._visuals.get(w).rect}});
+    }
+    await settle(800);
+    await p;
+    return frames;
+}
+
+// 22m. Shrinking in reveal style (full -> left half): the snapshot keeps its
+// own size and is cropped by the moving edge, never squished; the live
+// window appears unscaled and cropped, its left edge on the outline's.
+{
+    mock.values.set('custom:animation-style', 'reveal');
+    const w = fresh({frame:{...AREAS[0]}, lag:20});
+    fullState(w);
+    // The motion's end hands over to the hold, which may scale the window:
+    // no reveal clip may be left at that point.
+    const clipsAtHold = [];
+    const realHold = e._hold.bind(e);
+    e._hold = (w_, actor, target, shape) => {clipsAtHold.push(actor.clip); realHold(w_, actor, target, shape);};
+    const f = await watchReveal(w, 'left');
+    e._hold = realHold;
+    assert(clipsAtHold.length === 1 && clipsAtHold[0] === null, 'no clip left when the motion ends');
+    assert(f.length > 20 && f.every(x => x.snap.width === 1000 && x.snap.height === 800),
+        'shrinking: snapshot never scaled, only cropped');
+    // Before the motion starts the snapshot simply covers the hidden window.
+    const moving = f.filter(x => x.snap.clip);
+    assert(moving.length > 20 && moving.every(x => x.snap.below && x.snap.clip.width === x.curve.width),
+        'once moving: snapshot under the window, clipped to the outline');
+    const shown = f.filter(x => x.visible);
+    assert(shown.length > 5 && shown.every(x => x.scale[0] === 1 && x.scale[1] === 1), 'live window never scaled');
+    assert(shown.every(x => x.clip && x.clip.width === x.curve.width && x.left === x.curve.x), 'live window cropped to the outline, left edges aligned');
+    assert(mock.widgets.every(x => x.destroyed), 'snapshot removed');
+    clean(w, 'reveal shrinking');
+}
+
+// 22n. Growing (left half -> full): before the handover the snapshot may
+// stretch to fill the outline (nothing bigger exists yet); after it the
+// live window is unscaled and cropped. Nothing is ever scaled down.
+{
+    const w = fresh({frame:{x:0, y:0, width:500, height:800}, lag:20});
+    halfState(w);
+    const f = await watchReveal(w, 'right');
+    assert(f.every(x => x.snap.width >= 500 && x.snap.height >= 800), 'growing: snapshot never scaled down');
+    const shown = f.filter(x => x.visible);
+    assert(shown.length > 5 && shown.every(x => x.scale[0] === 1 && x.clip.width === x.curve.width),
+        'growing: live window unscaled, cropped to the outline');
+    assert(mock.widgets.every(x => x.destroyed) && w.maximizedHorizontally, 'growing: ends full, snapshots removed');
+    clean(w, 'reveal growing');
+}
+
+// 22o. Interrupting or closing a reveal leaves no clip behind.
+{
+    const w = fresh({frame:{...AREAS[0]}, lag:20});
+    fullState(w);
+    const p1 = press('left');
+    for (let i = 0; i < 25; i++) await step(2);
+    const p2 = press('down');
+    await settle(800);
+    await Promise.all([p1, p2]);
+    assert(w.frame.width === 500 && w.frame.height === 400, 'reveal: Left then Down ends bottom-left');
+    clean(w, 'reveal interrupted');
+
+    const c = fresh({frame:{...AREAS[0]}, lag:20});
+    fullState(c);
+    const p3 = press('left');
+    for (let i = 0; i < 25; i++) await step(2);
+    c.unmanaged = true;
+    c.emit('unmanaging');
+    await settle(300);
+    await p3;
+    clean(c, 'reveal closed');
+    mock.values.set('custom:animation-style', 'morph');
 }
 
 // 23. Closing mid-morph removes the snapshot and stops driving the window.

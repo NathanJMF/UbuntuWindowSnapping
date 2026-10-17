@@ -16,6 +16,9 @@ import {placeWindow, sameFrame, interpolateRect, travelDuration, visualTransform
 
 const UUID = 'tiling-assistant@ubuntu.com';
 const rect = r => ({x: r.x, y: r.y, width: r.width, height: r.height});
+// Start position of something `size` long whose anchor point (0 start edge,
+// 1 end edge, 0.5 centre) lines up with that point of the span start..size.
+const alignOn = (size, start, span, anchor) => start + anchor*span - anchor*size;
 const COVER_FADE_MS = 120;
 // Morph style: the live window fades in over this long once the app has
 // drawn its final size, or from this fraction of the motion at the latest
@@ -33,12 +36,15 @@ const MORPH_READY_LIMIT = 0.6;
 const MORPH_QUIET_MS = 24;
 // Some apps (Claude desktop) draw a follow-up frame about 40-55 ms after
 // their first frame at a new size, with the corrected layout. The delay is
-// learned per window: follow-ups up to MORPH_FOLLOW_WINDOW_MS after the
-// first frame count. A window known to draw one (learned delay of at least
+// learned per window as the MORPH_FOLLOW_PERCENTILE of its last
+// MORPH_FOLLOW_SAMPLES samples (no follow-up counts as 0): follow-ups up to
+// MORPH_FOLLOW_WINDOW_MS after the first frame count. A window known to draw one (learned delay of at least
 // MORPH_FOLLOW_MIN_MS) is handed over only after that delay (capped at
 // MORPH_FOLLOW_CAP_MS) plus MORPH_FOLLOW_QUIET_MS without drawing, and its
 // fallback handover moves to MORPH_FOLLOW_READY_LIMIT of the motion.
 const MORPH_FOLLOW_WINDOW_MS = 80;
+const MORPH_FOLLOW_SAMPLES = 12;
+const MORPH_FOLLOW_PERCENTILE = 0.75;
 const MORPH_FOLLOW_MIN_MS = 10;
 const MORPH_FOLLOW_CAP_MS = 60;
 const MORPH_FOLLOW_QUIET_MS = 8;
@@ -100,8 +106,10 @@ export default class KeyboardMonitorSnap extends Extension {
         // Window -> smoothed absolute deviation of latency samples.
         this._latencySpread = new WeakMap();
         this._redraw = new WeakMap();
-        // Window -> learned delay (ms) of its follow-up frame after a resize.
+        // Window -> learned delay (ms) of its follow-up frame after a resize,
+        // and the recent samples it is computed from.
         this._followUp = new WeakMap();
+        this._followSamples = new WeakMap();
         // Follow-up observations still running after their morph ended, by
         // stop function and by window (to end them before a maximize).
         this._learners = new Set();
@@ -274,7 +282,8 @@ export default class KeyboardMonitorSnap extends Extension {
         Twm.clearTilingProps(window.get_id());
         window.isTiled = false;
         window.tiledRect = null;
-        const morph = this._settings.get_string('animation-style') === 'morph';
+        const style = this._settings.get_string('animation-style');
+        const morph = style === 'morph' || style === 'reveal';
         const effects = this._effects(window, {morph});
         // A cancelled placement drops its snapshots and skips at once,
         // including a maximize cover the placement is waiting on.
@@ -286,7 +295,7 @@ export default class KeyboardMonitorSnap extends Extension {
             animate: (from, to, apply) => {
                 const start = this._visuals.get(window)?.rect ?? this._displayedRect(window) ?? from;
                 return morph && effects.snapshot()
-                    ? this._morph(window, start, to, apply, operation, effects)
+                    ? this._morph(window, start, to, apply, operation, effects, {reveal: style === 'reveal'})
                     : this._animate(window, start, to, apply, operation);
             },
             monitorExists: index => this._monitorExists(index),
@@ -349,6 +358,7 @@ export default class KeyboardMonitorSnap extends Extension {
         // A previous hold or relax transition is superseded by this motion.
         this._visuals.get(window)?.stopHold?.();
         actor.remove_all_transitions();
+        actor.remove_clip?.();
         // Exact mapping belongs to the cover this motion just faded out; a
         // later motion must not inherit it.
         const exactUntil = this._exactUntil.get(window) ?? 0;
@@ -458,7 +468,13 @@ export default class KeyboardMonitorSnap extends Extension {
     // once. When that size is drawn, the live window, mapped onto the curve,
     // fades in as the snapshot fades out. App speed only decides when the
     // fade starts, never how smoothly the window moves.
-    _morph(window, from, to, apply, operation, effects) {
+    // Reveal style (reveal: true): content is never scaled down. The snapshot
+    // sits under the live window, scaled up only along an axis where it is
+    // smaller than the moving outline, and cropped to the outline. After the
+    // handover the live window fades in on top at its true size, its fixed
+    // edge aligned with the outline, cropped too; where it is smaller (a
+    // shrinking window) the snapshot shows in the remaining strip.
+    _morph(window, from, to, apply, operation, effects, {reveal = false} = {}) {
         const base = this._animationDuration();
         const actor = window.get_compositor_private();
         const cover = effects.snapshot();
@@ -466,13 +482,18 @@ export default class KeyboardMonitorSnap extends Extension {
             return this._animate(window, from, to, apply, operation);
         const duration = travelDuration(base, from, to);
         const exact = {anchor: anchorFor(from, to), maxStretch: null, growth: {x: 0, y: 0}};
-        this._trace(window, 'animate', {from, to, duration, style: 'morph',
+        this._trace(window, 'animate', {from, to, duration, style: reveal ? 'reveal' : 'morph',
             followUp: Math.round(this._followUp.get(window) ?? 0),
             client: window.get_client_type?.() === Meta.WindowClientType.X11 ? 'x11' : 'wayland'});
         this._visuals.get(window)?.stopHold?.();
         actor.remove_all_transitions();
+        actor.remove_clip?.();
         this._exactUntil.delete(window);
         const startSize = this._drawnFrame(window, actor).frame;
+        // The snapshot's own size, before any scaling.
+        const natural = {width: cover.width, height: cover.height};
+        if (reveal)
+            global.window_group.set_child_below_sibling(cover, actor);
         // One request for the final size; nothing in between.
         apply(to);
         return new Promise((resolve, reject) => {
@@ -538,9 +559,12 @@ export default class KeyboardMonitorSnap extends Extension {
                 if (!error) {
                     // The live window takes over; an unfinished fade completes
                     // on its own while the hold keeps the window on target.
+                    // In reveal style the snapshot is underneath and now fully
+                    // hidden by the opaque window at its final size.
                     actor.opacity = 255;
+                    actor.remove_clip?.();
                     this._showAt(window, actor, end, exact);
-                    effects.dropCover(fadeFrom === null ? Math.min(fadeLimit, MORPH_MIN_FADE_MS)
+                    effects.dropCover(reveal ? 0 : fadeFrom === null ? Math.min(fadeLimit, MORPH_MIN_FADE_MS)
                         : Math.max(0, fadeMs-(elapsed-fadeFrom)));
                     this._hold(window, actor, end, exact);
                 } else if (!operation.superseded) {
@@ -564,8 +588,19 @@ export default class KeyboardMonitorSnap extends Extension {
                         reaim(elapsed, g, 'drawn');
                 }
                 const curve = curveAt(elapsed);
-                cover.set_position(curve.x, curve.y);
-                cover.set_size(curve.width, curve.height);
+                if (reveal) {
+                    // Scale up only where the snapshot is smaller; crop the rest.
+                    const width = Math.max(natural.width, curve.width);
+                    const height = Math.max(natural.height, curve.height);
+                    const x = alignOn(width, curve.x, curve.width, exact.anchor.x);
+                    const y = alignOn(height, curve.y, curve.height, exact.anchor.y);
+                    cover.set_position(x, y);
+                    cover.set_size(width, height);
+                    cover.set_clip(curve.x-x, curve.y-y, curve.width, curve.height);
+                } else {
+                    cover.set_position(curve.x, curve.y);
+                    cover.set_size(curve.width, curve.height);
+                }
                 const sized = sameSize(drawn, end);
                 if (sized && sizedAt === null)
                     sizedAt = lastDamage;
@@ -581,7 +616,13 @@ export default class KeyboardMonitorSnap extends Extension {
                     fadeMs = Math.max(Math.min(fadeLimit, MORPH_MIN_FADE_MS),
                         Math.min(fadeLimit, MORPH_FADE_END*duration-elapsed));
                 }
-                if (fadeFrom !== null) {
+                if (fadeFrom !== null && reveal) {
+                    // The live window fades in on top, unscaled and cropped;
+                    // the snapshot underneath stays until the motion ends.
+                    const f = fadeMs <= 0 ? 1 : Math.min(1, (elapsed-fadeFrom)/fadeMs);
+                    actor.opacity = Math.round(255*f);
+                    this._showRevealed(window, actor, curve, exact.anchor);
+                } else if (fadeFrom !== null) {
                     actor.opacity = 255;
                     this._showAt(window, actor, curve, exact);
                     cover.opacity = fadeMs <= 0 ? 0
@@ -593,7 +634,7 @@ export default class KeyboardMonitorSnap extends Extension {
                     this._visuals.set(window, visual);
                 }
                 if (this._settings.get_boolean('debug-logging'))
-                    console.log(`${this.uuid}: FRAME ${JSON.stringify({id:window.get_id(), style:'morph', elapsed,
+                    console.log(`${this.uuid}: FRAME ${JSON.stringify({id:window.get_id(), style:reveal ? 'reveal' : 'morph', elapsed,
                         curve, end, drawn, mutter:rect(window.get_frame_rect()), sized, ready, fadeFrom,
                         sinceDamage:Math.round((now-lastDamage)/1000), cover:cover.opacity, fadeMs, followUp,
                         sinceSized:sizedAt === null ? null : Math.round((now-sizedAt)/1000),
@@ -654,8 +695,8 @@ export default class KeyboardMonitorSnap extends Extension {
     // app keep drawing? Draws within 3 ms form one burst; the latest burst
     // starting within MORPH_FOLLOW_WINDOW_MS is the follow-up. No sample is
     // taken for same-size moves, or when the window ended before a missing
-    // follow-up could be ruled out. The estimate rises at once and decays
-    // slowly, so an occasional snap without a follow-up does not cut it short.
+    // follow-up could be ruled out. The estimate is a percentile of recent
+    // samples: one slow or missing follow-up barely moves it.
     _learnFollowUp(window, sizedAt, draws, from, to, complete) {
         if (sizedAt === null || (from.width === to.width && from.height === to.height))
             return;
@@ -674,9 +715,14 @@ export default class KeyboardMonitorSnap extends Extension {
         if (follow === null && !complete)
             return;
         follow ??= 0;
-        const previous = this._followUp.get(window);
-        this._followUp.set(window, previous === undefined || follow > previous
-            ? follow : previous + 0.25*(follow-previous));
+        const samples = this._followSamples.get(window) ?? [];
+        samples.push(follow);
+        if (samples.length > MORPH_FOLLOW_SAMPLES)
+            samples.shift();
+        this._followSamples.set(window, samples);
+        const sorted = [...samples].sort((a, b) => a-b);
+        this._followUp.set(window, sorted[Math.min(sorted.length-1,
+            Math.floor(MORPH_FOLLOW_PERCENTILE*sorted.length))]);
         this._trace(window, 'follow-up', {sample: Math.round(follow), learned: Math.round(this._followUp.get(window))});
     }
     // The window frame as currently drawn: the actor's own geometry (synced
@@ -729,6 +775,24 @@ export default class KeyboardMonitorSnap extends Extension {
         const mean = this._latency.get(window) ?? DEFAULT_LATENCY_MS;
         const spread = this._latencySpread.get(window) ?? 0;
         return Math.min(MAX_LEAD_MS, Math.max(0, mean - 2*spread));
+    }
+    // Show the live window unscaled, its drawn frame aligned to `rect` at the
+    // anchor (the edge that does not move), cropped to `rect`.
+    _showRevealed(window, actor, rect, anchor) {
+        const {frame} = this._drawnFrame(window, actor);
+        const x = alignOn(frame.width, rect.x, rect.width, anchor.x);
+        const y = alignOn(frame.height, rect.y, rect.height, anchor.y);
+        actor.set_pivot_point(0, 0);
+        actor.scale_x = 1;
+        actor.scale_y = 1;
+        actor.translation_x = x-frame.x;
+        actor.translation_y = y-frame.y;
+        // The clip is in the actor's own (untransformed) coordinates.
+        actor.set_clip(rect.x-actor.x-actor.translation_x, rect.y-actor.y-actor.translation_y,
+            rect.width, rect.height);
+        const visual = this._visuals.get(window) ?? {};
+        visual.rect = {...rect};
+        this._visuals.set(window, visual);
     }
     // Draw the window actor so its current real frame appears at `rect`,
     // within the stretch cap. Remembers what was actually drawn.
@@ -793,6 +857,7 @@ export default class KeyboardMonitorSnap extends Extension {
         visual.stopHold?.();
         if (!actor)
             return;
+        actor.remove_clip?.();
         const identity = {scale_x: 1, scale_y: 1, translation_x: 0, translation_y: 0};
         if (smooth) {
             actor.ease({...identity, duration: RELAX_MS, mode: Clutter.AnimationMode.EASE_OUT_QUAD});
