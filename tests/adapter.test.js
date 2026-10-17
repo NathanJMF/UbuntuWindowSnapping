@@ -154,7 +154,7 @@ try {
  assert(a.actor.opacity===255,'window visible after cover released');
  a.frames=mock.frames=[];mock.skipped=[];mock.covers=0;
  await e._snap('right');
- assert(a.maximizedHorizontally&&mock.skipped.length===1&&mock.covers===0,'half -> full skips the maximize zoom with no cover');
+ assert(a.maximizedHorizontally&&mock.skipped.length===1&&mock.covers===1,'half -> full skips the maximize zoom; only the maximize cover');
  assert(mock.frames.some(f=>f.width>500&&f.width<1000),'half -> full grows through real intermediate sizes');
  // Lagging client: the real frame trails one request behind, yet every
  // animation frame shows the window exactly on the curve.

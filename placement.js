@@ -177,6 +177,10 @@ async function placeStages(window, target, monitor, full, {waitFor, both, constr
     if (full) {
         // Never issue maximize while a move_to_monitor is still pending.
         // The frame already fills the work area, so skip GNOME's zoom effect.
+        // Apps may draw one frame laid out for the unmaximized margins when
+        // the state flips; a snapshot of the landed window covers that until
+        // the app's maximized frame has settled.
+        effects?.coverState?.();
         effects?.skip();
         if (window.maximize.length === 0)
             window.maximize();
@@ -185,6 +189,7 @@ async function placeStages(window, target, monitor, full, {waitFor, both, constr
         await waitFor(() => window.get_monitor() === monitor &&
             window.maximizedHorizontally && window.maximizedVertically &&
             sameFrame(window.get_frame_rect(), target), 'maximize');
+        await effects?.uncoverState?.();
     }
     return {frame: frameCopy(window.get_frame_rect()), full};
 }

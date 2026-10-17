@@ -320,3 +320,13 @@ GSETTINGS_SCHEMA_DIR="$PWD/schemas" gsettings set org.gnome.shell.extensions.key
 ```
 
 Validation: 530 checks (121 rules, 77 adapter, 79 delayed placement, 253 lifecycle).
+
+## Covered maximize (version 23, experiment/animations branch)
+
+On top half ↔ full, a panel pinned to the right of Claude desktop jumped left for one frame. Version 22's logs show the morph itself never scaled a vertical-only snap horizontally (60 snaps, zero frames). The likely cause is the app: when GNOME maximizes a window it removes the invisible shadow margin, and Chromium-based apps can present one frame still laid out for the old margin before correcting it.
+
+Maximizing at the end of a snap, in either style, now happens under a snapshot of the landed window, which looks identical to what was already on screen. The snapshot is removed once the app has drawn after the maximize and then nothing new for 24 ms, or after 150 ms at most. A cancelled snap (interruption, mouse grab, disable) now releases its snapshots and effect skips immediately. With debug logging on, each frame the app draws under the cover is logged as `FRAME {"style":"state", drawn, buffer, mutter, mutterBuffer}` to confirm or rule out the offset frame. A `state-cover` trace records whether it settled.
+
+`tests/lifecycle.test.js` adds a client whose first maximized frame is offset, one that does not redraw, a maximize slower than the cover limit, and a grab during the cover. It also has a 60 s watchdog that turns a hung snap into a failure naming the last passed check.
+
+Validation: 572 checks (121 rules, 77 adapter, 79 delayed placement, 295 lifecycle), with the cover's behaviours mutation-checked.

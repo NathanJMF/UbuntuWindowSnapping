@@ -96,7 +96,15 @@ const local = text.match(/^import [^;]* from '\.\/[^']*';$/gm).map(line =>
     line.replace(/'\.\/(.*)'/, (_m, f) => `'${Gio.File.new_for_path(`${root}/${f}`).get_uri()}'`)).join('\n');
 GLib.file_set_contents(path, local + '\n' + setup + text.replace(/^import [^;]*;\n/gm, ''));
 let count = 0;
-function assert(v, msg) {count++; if (!v) throw new Error(msg);}
+let lastPassed = '(none)';
+function assert(v, msg) {count++; if (!v) throw new Error(msg); lastPassed = msg;}
+// Real-time watchdog: a hang (a snap that never finishes) fails with the
+// last check that passed instead of stalling the run.
+const watchdog = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 60000, () => {
+    printerr(`JS ERROR: Error: lifecycle tests timed out; last passed: ${lastPassed}`);
+    imports.system.exit(1);
+    return GLib.SOURCE_REMOVE;
+});
 try {
 const {default:Ext, mock, signals, layout} = await import(Gio.File.new_for_path(path).get_uri());
 const AREAS = [{x:0, y:0, width:1000, height:800}, {x:1000, y:0, width:1000, height:800}];
@@ -146,8 +154,28 @@ function makeWindow({frame = {x:100, y:100, width:600, height:400}, lag = 40, ma
             const tick = () => {if (--left <= 0) apply(); else mock.later.push(tick);};
             mock.later.push(tick);
         },
-        maximize() {this.maximizedHorizontally = this.maximizedVertically = true;
-            this.frame = this.get_work_area_for_monitor(this.get_monitor()); this.drawn = {...this.frame}; sizeChange();},
+        // On maximize the app redraws (damage). maximizeGlitch: its first
+        // maximized frame is laid out for the old margins ('offset') and is
+        // corrected that many ms later. quietMaximize: it does not redraw.
+        // lateMaximize: Mutter reports the state that many steps later.
+        maximize() {
+            const apply = () => {
+                this.maximizedHorizontally = this.maximizedVertically = true;
+                this.frame = this.get_work_area_for_monitor(this.get_monitor());
+                this.drawn = {...this.frame};
+                sizeChange();
+                if (this.quietMaximize) return;
+                this.content = this.maximizeGlitch ? 'offset' : 'laid-out';
+                this.actor.emit('damaged');
+                if (this.maximizeGlitch) {
+                    this.relayoutAt = mock.clock + this.maximizeGlitch*1000;
+                }
+            };
+            if (!this.lateMaximize) {apply(); return;}
+            let left = this.lateMaximize;
+            const tick = () => {if (--left <= 0) apply(); else mock.later.push(tick);};
+            mock.later.push(tick);
+        },
         // Wayland: Mutter's frame changes when the client acknowledges a size,
         // which is when it draws it (after its lag). frameOnRequest models
         // X11, where the frame changes at once. Size limits (minWidth) are
@@ -227,6 +255,14 @@ const step = async (ms = 4) => {
     await flush();
 };
 const settle = async (ms = 1500) => {for (let t = 0; t < ms; t += 4) await step(4);};
+// Keep time moving until the snap finishes; fail clearly instead of hanging.
+const finishes = async (p, label, ms = 2000) => {
+    let done = false;
+    p.then(() => {done = true;}, () => {done = true;});
+    for (let t = 0; t < ms && !done; t += 4) await step(4);
+    assert(done, `${label}: snap finished`);
+    return p;
+};
 const press = async dir => {
     const p = e._snap(dir).catch(error => {throw new Error(`snap ${dir} failed: ${error.message}`);});
     await flush();
@@ -693,7 +729,8 @@ const halfState = w => e._states.set(w, {layout:{x:'left', y:null}, monitor:0,
     await settle(600);
     await p;
     const snap = mock.widgets[0];
-    assert(mock.widgets.length === 1, 'one snapshot per placement');
+    // The morph's snapshot, plus one covering the maximize at the end.
+    assert(mock.widgets.length === 2, 'morph snapshot plus maximize cover');
     const widths = snap.moves.map(m => m.width);
     assert(widths.length > 20 && widths.every((v, i) => i === 0 || v >= widths[i-1]), 'snapshot grows along the curve every frame');
     assert(widths.at(-1) === 1000, 'snapshot reaches the target size');
@@ -701,6 +738,7 @@ const halfState = w => e._states.set(w, {layout:{x:'left', y:null}, monitor:0,
     assert(samples.filter(s => !s.drawnFull).every(s => s.opacity === 0), 'live window hidden until the app has drawn the final size');
     assert(samples.some(s => s.drawnFull && s.opacity === 255), 'live window shown once drawn');
     assert(snap.destroyed && snap.opacityAtDestroy === 0, 'snapshot faded out, not cut');
+    assert(mock.widgets[1].destroyed, 'maximize cover removed');
     assert(w.maximizedHorizontally && w.maximizedVertically, 'morph to full still maximizes natively');
     clean(w, 'morph');
 }
@@ -850,6 +888,77 @@ for (const [fade, label] of [[0, 'instant swap'], [30, '30 ms fade']]) {
     clean(w, `morph ${label}`);
 }
 
+// 22g. Maximizing at the end: the app's first maximized frame is laid out
+// for the old margins (shifted). A snapshot of the landed window covers the
+// maximize until the corrected frame has settled, in both styles.
+for (const style of ['morph', 'live']) {
+    morphStyle(style === 'morph');
+    const w = fresh({frame:{x:0, y:0, width:1000, height:400}, lag:10});
+    w.maximizeGlitch = 10;
+    e._states.set(w, {layout:{x:null, y:'up'}, monitor:0, rect:{x:0, y:0, width:1000, height:400},
+        frame:{x:0, y:0, width:1000, height:400}});
+    const traces = [];
+    const realTrace = e._trace.bind(e);
+    e._trace = (w_, phase, extra) => {if (phase === 'state-cover') traces.push(extra); realTrace(w_, phase, extra);};
+    mock.widgets = [];
+    let offsetVisible = 0, offsetFrames = 0;
+    const p = press('up');
+    for (let i = 0; i < 150; i++) {
+        await step(2);
+        if (w.content === 'offset') {
+            offsetFrames++;
+            if (w.actor.opacity !== 0) offsetVisible++;
+        }
+    }
+    await settle(600);
+    await p;
+    e._trace = realTrace;
+    w.maximizeGlitch = 0;
+    assert(w.maximizedHorizontally, `${style}: top half -> Up -> full, maximized`);
+    assert(offsetFrames > 0 && offsetVisible === 0, `${style}: the shifted first maximized frame is never visible (${offsetVisible}/${offsetFrames})`);
+    assert(traces.length === 1 && traces[0].settled && traces[0].damages >= 2, `${style}: cover removed after the corrected frame settled (${JSON.stringify(traces)})`);
+    assert(mock.widgets.every(x => x.destroyed), `${style}: all snapshots removed`);
+    clean(w, `${style} maximize cover`);
+}
+morphStyle(true);
+
+// 22h. An app that does not redraw on maximize: the cover is removed at its
+// time limit. A maximize slower than that limit does not hang the snap.
+for (const [opts, label] of [[{quietMaximize:true}, 'no redraw'], [{lateMaximize:45}, 'slow maximize']]) {
+    const w = fresh({frame:{x:0, y:0, width:1000, height:400}, lag:10});
+    Object.assign(w, opts);
+    e._states.set(w, {layout:{x:null, y:'up'}, monitor:0, rect:{x:0, y:0, width:1000, height:400},
+        frame:{x:0, y:0, width:1000, height:400}});
+    mock.widgets = [];
+    const p = press('up');
+    await finishes(p, label);
+    await settle(100);
+    Object.assign(w, {quietMaximize:false, lateMaximize:0});
+    assert(w.maximizedHorizontally && mock.widgets.every(x => x.destroyed), `${label}: maximized, cover removed`);
+    clean(w, `maximize cover ${label}`);
+}
+
+// 22i. A mouse grab while the maximize is covered removes the cover.
+{
+    const w = fresh({frame:{x:0, y:0, width:1000, height:400}, lag:10});
+    w.quietMaximize = true;
+    e._states.set(w, {layout:{x:null, y:'up'}, monitor:0, rect:{x:0, y:0, width:1000, height:400},
+        frame:{x:0, y:0, width:1000, height:400}});
+    mock.widgets = [];
+    const p = press('up');
+    for (let i = 0; i < 200 && !(w.maximizedHorizontally && mock.widgets.some(x => !x.destroyed && w.actor.opacity === 0)); i++)
+        await step(2);
+    assert(w.maximizedHorizontally && w.actor.opacity === 0, 'maximize under its cover');
+    // Let the maximize be confirmed, so the snap is waiting on the cover.
+    for (let i = 0; i < 6; i++) await step(2);
+    assert(w.actor.opacity === 0 && e._busy.has(w), 'snap waiting on the maximize cover');
+    mock.grab(null, w);
+    await finishes(p, 'grab during maximize cover', 8);
+    w.quietMaximize = false;
+    assert(mock.widgets.every(x => x.destroyed) && w.actor.opacity === 255, 'grab: cover removed, window visible');
+    clean(w, 'maximize cover grab');
+}
+
 // 23. Closing mid-morph removes the snapshot and stops driving the window.
 {
     const w = fresh({frame:{x:0, y:0, width:500, height:800}});
@@ -908,8 +1017,11 @@ for (const [fade, label] of [[0, 'instant swap'], [30, '30 ms fade']]) {
     const p = press('right');
     await settle(600);
     await p;
-    assert(mock.widgets.length === 0 && w.requests.length > 3, 'live style: no snapshot, continuous requests');
+    // Ending full, the only snapshot is the one covering the maximize.
+    assert(mock.widgets.length === 1 && mock.widgets[0].destroyed && w.requests.length > 3,
+        'live style: no morph snapshot, continuous requests');
     clean(w, 'live style');
 }
 print(`PASS: ${count} lifecycle assertions`);
+GLib.Source.remove(watchdog);
 } finally {GLib.unlink(path); GLib.rmdir(folder);}

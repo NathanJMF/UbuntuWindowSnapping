@@ -34,6 +34,9 @@ const MORPH_QUIET_MS = 24;
 // A re-aimed morph glides its end point to the new target over this long
 // (eased at both ends), so neither position nor speed jumps.
 const MORPH_REAIM_MS = 40;
+// Maximizing is covered by a snapshot of the landed window until the app has
+// drawn its maximized frame and gone quiet, or this long at most.
+const STATE_COVER_MAX_MS = 150;
 // Confirmation checks run about once per frame, starting immediately, so a
 // state that is already true settles in one frame instead of two 25 ms polls.
 const SETTLE_POLL_MS = 16;
@@ -255,6 +258,9 @@ export default class KeyboardMonitorSnap extends Extension {
         window.tiledRect = null;
         const morph = this._settings.get_string('animation-style') === 'morph';
         const effects = this._effects(window, {morph});
+        // A cancelled placement drops its snapshots and skips at once,
+        // including a maximize cover the placement is waiting on.
+        operation.cancelEffects = () => effects.release();
         const applied = await placeWindow(window, target, monitor, {
             both: Meta.MaximizeFlags.BOTH,
             previousPlacement: operation.previousPlacement,
@@ -697,7 +703,25 @@ export default class KeyboardMonitorSnap extends Extension {
         // the native change they cover has been confirmed.
         let pending = 0;
         let handler = null;
+        // Snapshot covering a native state change (maximize) and its watch.
+        let stateCover = null;
+        let stateWatch = null;
         const enabled = () => actor && this._animationDuration() > 0;
+        const endState = () => {
+            const watch = stateWatch;
+            stateWatch = null;
+            if (watch) {
+                watch.timeline.disconnectObject(this);
+                actor.disconnectObject(watch.timeline);
+                watch.timeline.stop();
+                watch.waiting?.();
+            }
+            if (stateCover) {
+                stateCover.destroy();
+                stateCover = null;
+                actor.opacity = 255;
+            }
+        };
         const disarm = () => {
             if (pending > 0)
                 Main.wm._skippedActors?.delete(actor);
@@ -755,6 +779,73 @@ export default class KeyboardMonitorSnap extends Extension {
             // the morph fades it out itself.
             coversAll: morph,
             snapshot: () => cover,
+            coverState: () => {
+                if (!enabled() || stateCover) return;
+                let content;
+                try {
+                    content = actor.paint_to_content(window.get_frame_rect());
+                } catch (error) {
+                    return;
+                }
+                const at = this._visuals.get(window)?.rect ?? this._displayedRect(window) ??
+                    rect(window.get_frame_rect());
+                stateCover = new St.Widget({content});
+                stateCover.set_position(at.x, at.y);
+                stateCover.set_size(at.width, at.height);
+                global.window_group.add_child(stateCover);
+                global.window_group.set_child_above_sibling(stateCover, actor);
+                actor.opacity = 0;
+                // Watch what the app draws from now on. The outcome is
+                // recorded as it happens, so it does not matter whether
+                // uncoverState is called before or after the time limit.
+                const timeline = new Clutter.Timeline({actor, duration: STATE_COVER_MAX_MS});
+                const watch = {timeline, lastDamage: GLib.get_monotonic_time(), damages: 0,
+                    started: GLib.get_monotonic_time(), expired: false, waiting: null};
+                stateWatch = watch;
+                const settled = () => watch.damages > 0 &&
+                    GLib.get_monotonic_time()-watch.lastDamage >= MORPH_QUIET_MS*1000;
+                watch.finish = done => {
+                    if (stateWatch !== watch) return;
+                    this._trace(window, 'state-cover', {settled: done, damages: watch.damages,
+                        ms: Math.round((GLib.get_monotonic_time()-watch.started)/1000)});
+                    endState();
+                };
+                actor.connectObject('damaged', () => {
+                    watch.lastDamage = GLib.get_monotonic_time();
+                    watch.damages++;
+                    if (this._settings.get_boolean('debug-logging')) {
+                        const drawn = this._drawnFrame(window, actor);
+                        console.log(`${this.uuid}: FRAME ${JSON.stringify({id:window.get_id(), style:'state',
+                            ms:Math.round((watch.lastDamage-watch.started)/1000), drawn:drawn.frame,
+                            buffer:drawn.buffer, mutter:rect(window.get_frame_rect()),
+                            mutterBuffer:rect(window.get_buffer_rect())})}`);
+                    }
+                }, timeline);
+                timeline.connectObject('new-frame', () => {
+                    if (watch.waiting && settled())
+                        watch.finish(true);
+                }, 'completed', () => {
+                    watch.expired = true;
+                    if (watch.waiting)
+                        watch.finish(false);
+                }, this);
+                timeline.start();
+            },
+            // Resolves once the app has drawn after the state change and then
+            // nothing new for MORPH_QUIET_MS, or once STATE_COVER_MAX_MS has
+            // passed, or when the placement ends some other way.
+            uncoverState: () => new Promise(resolve => {
+                const watch = stateWatch;
+                if (!watch) {
+                    resolve();
+                    return;
+                }
+                watch.waiting = resolve;
+                if (watch.expired)
+                    watch.finish(false);
+                else if (watch.damages > 0 && GLib.get_monotonic_time()-watch.lastDamage >= MORPH_QUIET_MS*1000)
+                    watch.finish(true);
+            }),
             dropCover: ms => {
                 if (!cover) return;
                 const fading = cover;
@@ -780,6 +871,7 @@ export default class KeyboardMonitorSnap extends Extension {
                     onStopped: () => fading.destroy()});
             },
             release: () => {
+                endState();
                 if (cover) {
                     cover.destroy();
                     cover = null;
@@ -845,7 +937,7 @@ export default class KeyboardMonitorSnap extends Extension {
         const owner = this._dependency.stateObj._keybindingHandler;
         this._busy.add(window);
         const operation = {owner, cancelled:false,
-            cancel() {this.cancelled=true; this.cancelWait?.(); this.cancelAnimation?.();},
+            cancel() {this.cancelled=true; this.cancelWait?.(); this.cancelAnimation?.(); this.cancelEffects?.();},
             supersede() {if (!this.cancelled) {this.superseded=true; this.cancel();}}};
         this._operations.set(window, operation);
         let intended = null;
