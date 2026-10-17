@@ -234,6 +234,7 @@ const step = async (ms = 4) => {
         const resized = r.width !== win.drawn.width || r.height !== win.drawn.height;
         win.drawn = r;
         win.frame = {...r};
+        if (resized) win.sizedDrawAt = mock.clock;
         if (resized && win.relayout) {
             win.content = 'stale';
             win.relayoutAt = mock.clock + win.relayout*1000;
@@ -763,6 +764,8 @@ async function watchMorph(w, dir, {stepMs = 4, steps = 80} = {}) {
         if (result.shownAt === null && w.actor.opacity === 255 && e._visuals.has(w)) {
             result.shownAt = (mock.clock-start)/1000;
             result.content = w.content;
+            // How long after the app's first frame at the new size.
+            result.afterSized = w.sizedDrawAt === undefined ? null : (mock.clock-w.sizedDrawAt)/1000;
         }
         // When the snapshot first became fully transparent (or was removed).
         const snap = mock.widgets[0];
@@ -957,6 +960,92 @@ for (const [opts, label] of [[{quietMaximize:true}, 'no redraw'], [{lateMaximize
     w.quietMaximize = false;
     assert(mock.widgets.every(x => x.destroyed) && w.actor.opacity === 255, 'grab: cover removed, window visible');
     clean(w, 'maximize cover grab');
+}
+
+// 22j. Claude-style follow-up frame 43 ms after the first frame at a new
+// size. The first snap learns the delay; later snaps hand over only after
+// the corrected frame. A 160 ms base keeps the 75% fallback clear of it.
+{
+    mock.ints['animation-duration'] = 160;
+    const w = fresh({frame:{x:0, y:0, width:500, height:800}, lag:15});
+    w.relayout = 43;
+    halfState(w);
+    const runs = [];
+    for (const dir of ['right', 'left', 'right', 'left']) {
+        const r = await watchMorph(w, dir, {stepMs:2, steps:140});
+        runs.push(r);
+        // Settle the maximize/unmaximize so the next snap starts tracked.
+        await settle(200);
+    }
+    mock.ints['animation-duration'] = 120;
+    const learned = e._followUp.get(w);
+    assert(Math.abs(learned-43) <= 4, `follow-up delay learned (${learned} ms)`);
+    assert(runs[0].content === 'stale', 'first snap: not learned yet, handed over before the follow-up');
+    assert(runs.slice(1).every(r => r.content === 'laid-out'),
+        `later snaps: handed over after the corrected frame (${runs.map(r => r.content)})`);
+    assert(runs.slice(1).every(r => r.afterSized >= 49 && r.afterSized <= 56),
+        `handover about 51 ms after the first frame at size (${runs.map(r => r.afterSized)})`);
+    w.relayout = 0;
+    clean(w, 'learned follow-up');
+
+    // One snap without a follow-up (left half -> Down -> bottom-left quarter,
+    // no maximize to cut the observation short) only nudges it down.
+    const before = e._followUp.get(w);
+    await watchMorph(w, 'down', {stepMs:2, steps:140});
+    const after = e._followUp.get(w);
+    assert(after < before && after > before*0.7, `estimate decays slowly (${before} -> ${after})`);
+    clean(w, 'follow-up decay');
+}
+
+// 22j2. A short motion (120 ms base, 90 ms motion): the corrected frame
+// lands at about 61 ms, after the 60% point (about 58 ms with start-up) but
+// before the 75% fallback used for windows that draw a follow-up.
+{
+    mock.ints['animation-duration'] = 120;
+    const w = fresh({frame:{x:0, y:0, width:500, height:800}, lag:15});
+    w.relayout = 43;
+    e._followUp.set(w, 43);
+    halfState(w);
+    const r = await watchMorph(w, 'right', {stepMs:2, steps:140});
+    mock.ints['animation-duration'] = 120;
+    w.relayout = 0;
+    assert(r.content === 'laid-out', `follow-up window: fallback late enough for the corrected frame (saw ${r.content} at ${r.shownAt} ms)`);
+    clean(w, 'follow-up fallback');
+}
+
+// 22k. A terminal-style app (one draw per resize) learns no follow-up and
+// keeps the quick 24 ms handover.
+{
+    const w = fresh({frame:{x:0, y:0, width:500, height:800}, lag:15});
+    halfState(w);
+    const runs = [];
+    for (const dir of ['right', 'left', 'right']) {
+        runs.push(await watchMorph(w, dir, {stepMs:2, steps:120}));
+        await settle(200);
+    }
+    assert((e._followUp.get(w) ?? 0) < 10, `no follow-up learned (${e._followUp.get(w)})`);
+    assert(runs.every(r => r.afterSized >= 24 && r.afterSized <= 30), `quick handover kept (${runs.map(r => r.afterSized)})`);
+    clean(w, 'no follow-up');
+}
+
+// 22l. The learned wait is capped at 60 ms: a 70 ms follow-up does not
+// delay the handover further.
+{
+    mock.ints['animation-duration'] = 240;
+    const w = fresh({frame:{x:0, y:0, width:500, height:800}, lag:15});
+    w.relayout = 70;
+    halfState(w);
+    const runs = [];
+    for (const dir of ['right', 'left', 'right']) {
+        runs.push(await watchMorph(w, dir, {stepMs:2, steps:160}));
+        await settle(200);
+    }
+    mock.ints['animation-duration'] = 120;
+    assert(e._followUp.get(w) >= 66, `70 ms follow-up learned (${e._followUp.get(w)})`);
+    assert(runs.slice(1).every(r => r.afterSized >= 66 && r.afterSized <= 72),
+        `handover capped at 60 + 8 ms after the first frame (${runs.map(r => r.afterSized)})`);
+    w.relayout = 0;
+    clean(w, 'follow-up cap');
 }
 
 // 23. Closing mid-morph removes the snapshot and stops driving the window.

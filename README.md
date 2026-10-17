@@ -330,3 +330,17 @@ Maximizing at the end of a snap, in either style, now happens under a snapshot o
 `tests/lifecycle.test.js` adds a client whose first maximized frame is offset, one that does not redraw, a maximize slower than the cover limit, and a grab during the cover. It also has a 60 s watchdog that turns a hung snap into a failure naming the last passed check.
 
 Validation: 572 checks (121 rules, 77 adapter, 79 delayed placement, 295 lifecycle), with the cover's behaviours mutation-checked.
+
+## Learned follow-up frames (version 24, experiment/animations branch)
+
+Version 23's logs (315 snaps, no errors) ruled out the maximize as the source of Claude's occasional one-frame panel shift: under all 88 maximize covers, every frame matched Mutter's geometry, and Claude redrew once (~14 ms). Instead, Claude draws a follow-up frame after its first frame at a new size: in 190 of 207 morphs, 43 ms later (median; 75th percentile 48 ms, 90th 55 ms). The 24 ms quiet rule handed over between the two, so the corrected layout appeared after the handover in 183 morphs, sometimes masked by the crossfade and sometimes not.
+
+The follow-up delay is now learned per window:
+
+- **Observation.** After each morph, draws within 80 ms of the first frame at the final size are recorded. Draws within 3 ms form one burst, and the latest burst is the follow-up. Observation continues after the motion ends, but stops at a maximize, since the redraw for the new state is not a layout follow-up. Same-size moves are not sampled. The estimate rises at once and decays slowly (25% per sample), so one snap without a follow-up does not reset it.
+- **Handover.** A window with a learned follow-up of at least 10 ms is handed over after that delay (capped at 60 ms) plus 8 ms without drawing. Its fallback moves from 60% to 75% of the motion. Other windows (terminals, most Chromium pages) keep the 24 ms quiet rule.
+- **Logging.** `animate` traces and `FRAME` logs include `followUp`; each sample logs a `follow-up` trace.
+
+The first snap of a new window still learns, so its handover can precede the follow-up.
+
+Validation: 607 checks (121 rules, 77 adapter, 79 delayed placement, 330 lifecycle). Each learning behaviour was mutation-checked: learning, cap, asymmetric decay, ignoring maximize redraws, observing past the motion, and the 75% fallback.

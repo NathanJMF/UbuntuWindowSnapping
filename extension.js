@@ -31,6 +31,18 @@ const MORPH_READY_LIMIT = 0.6;
 // the old layout, then re-lay out a frame or two later. The handover waits
 // until the app has drawn the final size and then nothing new for this long.
 const MORPH_QUIET_MS = 24;
+// Some apps (Claude desktop) draw a follow-up frame about 40-55 ms after
+// their first frame at a new size, with the corrected layout. The delay is
+// learned per window: follow-ups up to MORPH_FOLLOW_WINDOW_MS after the
+// first frame count. A window known to draw one (learned delay of at least
+// MORPH_FOLLOW_MIN_MS) is handed over only after that delay (capped at
+// MORPH_FOLLOW_CAP_MS) plus MORPH_FOLLOW_QUIET_MS without drawing, and its
+// fallback handover moves to MORPH_FOLLOW_READY_LIMIT of the motion.
+const MORPH_FOLLOW_WINDOW_MS = 80;
+const MORPH_FOLLOW_MIN_MS = 10;
+const MORPH_FOLLOW_CAP_MS = 60;
+const MORPH_FOLLOW_QUIET_MS = 8;
+const MORPH_FOLLOW_READY_LIMIT = 0.75;
 // A re-aimed morph glides its end point to the new target over this long
 // (eased at both ends), so neither position nor speed jumps.
 const MORPH_REAIM_MS = 40;
@@ -88,6 +100,12 @@ export default class KeyboardMonitorSnap extends Extension {
         // Window -> smoothed absolute deviation of latency samples.
         this._latencySpread = new WeakMap();
         this._redraw = new WeakMap();
+        // Window -> learned delay (ms) of its follow-up frame after a resize.
+        this._followUp = new WeakMap();
+        // Follow-up observations still running after their morph ended, by
+        // stop function and by window (to end them before a maximize).
+        this._learners = new Set();
+        this._learnerByWindow = new WeakMap();
         // Window -> monotonic time until which the image maps exactly.
         this._exactUntil = new WeakMap();
         this._traceTimers = new Set();
@@ -449,6 +467,7 @@ export default class KeyboardMonitorSnap extends Extension {
         const duration = travelDuration(base, from, to);
         const exact = {anchor: anchorFor(from, to), maxStretch: null, growth: {x: 0, y: 0}};
         this._trace(window, 'animate', {from, to, duration, style: 'morph',
+            followUp: Math.round(this._followUp.get(window) ?? 0),
             client: window.get_client_type?.() === Meta.WindowClientType.X11 ? 'x11' : 'wayland'});
         this._visuals.get(window)?.stopHold?.();
         actor.remove_all_transitions();
@@ -473,8 +492,16 @@ export default class KeyboardMonitorSnap extends Extension {
             const fadeLimit = this._settings.get_int('morph-fade');
             let fadeFrom = null;
             let fadeMs = fadeLimit;
-            // When the app last drew anything (the snapshot counts as drawn).
+            // When the app last drew anything (the snapshot counts as drawn),
+            // when it first drew the final size, and every draw since.
             let lastDamage = GLib.get_monotonic_time();
+            let sizedAt = null;
+            const draws = [];
+            // Learned follow-up delay for this window (see MORPH_FOLLOW_*).
+            const followUp = this._followUp.get(window) ?? 0;
+            const follows = followUp >= MORPH_FOLLOW_MIN_MS;
+            const followWait = Math.min(followUp, MORPH_FOLLOW_CAP_MS);
+            const readyLimit = follows ? MORPH_FOLLOW_READY_LIMIT : MORPH_READY_LIMIT;
             let finished = false;
             const sameSize = (a, b) => Math.abs(a.width-b.width) <= 3 && Math.abs(a.height-b.height) <= 3;
             // Mutter's frame, once the app has acknowledged the request, is
@@ -495,6 +522,7 @@ export default class KeyboardMonitorSnap extends Extension {
                 glide = {from: current, at: elapsed,
                     ms: Math.max(1, Math.min(MORPH_REAIM_MS, duration-elapsed))};
                 end = target;
+                sizedAt = null;
                 this._trace(window, 'morph-reaim', {why, elapsed, from:current, to:target});
             };
             const finish = error => {
@@ -506,6 +534,7 @@ export default class KeyboardMonitorSnap extends Extension {
                 window.disconnectObject?.(timeline);
                 const elapsed = timeline.get_elapsed_time();
                 timeline.stop();
+                this._observeFollowUp(window, actor, sizedAt, draws, from, to);
                 if (!error) {
                     // The live window takes over; an unfinished fade completes
                     // on its own while the hold keeps the window on target.
@@ -524,7 +553,7 @@ export default class KeyboardMonitorSnap extends Extension {
                 const elapsed = timeline.get_elapsed_time();
                 const now = GLib.get_monotonic_time();
                 const drawn = this._drawnFrame(window, actor).frame;
-                const late = elapsed >= MORPH_READY_LIMIT*duration;
+                const late = elapsed >= readyLimit*duration;
                 // Re-aim at the size the app really takes, once it has drawn a
                 // new size that Mutter confirms. Mutter's frame alone cannot
                 // tell "not answered yet" from "answered with the old size",
@@ -538,7 +567,15 @@ export default class KeyboardMonitorSnap extends Extension {
                 cover.set_position(curve.x, curve.y);
                 cover.set_size(curve.width, curve.height);
                 const sized = sameSize(drawn, end);
-                const ready = sized && now-lastDamage >= MORPH_QUIET_MS*1000;
+                if (sized && sizedAt === null)
+                    sizedAt = lastDamage;
+                // Hand over once the content is final: after the learned
+                // follow-up frame for windows that draw one, otherwise after
+                // MORPH_QUIET_MS without drawing.
+                const ready = sized && (follows
+                    ? now-sizedAt >= (followWait+MORPH_FOLLOW_QUIET_MS)*1000 &&
+                      now-lastDamage >= MORPH_FOLLOW_QUIET_MS*1000
+                    : now-lastDamage >= MORPH_QUIET_MS*1000);
                 if (fadeFrom === null && (ready || late)) {
                     fadeFrom = elapsed;
                     fadeMs = Math.max(Math.min(fadeLimit, MORPH_MIN_FADE_MS),
@@ -558,14 +595,89 @@ export default class KeyboardMonitorSnap extends Extension {
                 if (this._settings.get_boolean('debug-logging'))
                     console.log(`${this.uuid}: FRAME ${JSON.stringify({id:window.get_id(), style:'morph', elapsed,
                         curve, end, drawn, mutter:rect(window.get_frame_rect()), sized, ready, fadeFrom,
-                        sinceDamage:Math.round((now-lastDamage)/1000), cover:cover.opacity, fadeMs,
+                        sinceDamage:Math.round((now-lastDamage)/1000), cover:cover.opacity, fadeMs, followUp,
+                        sinceSized:sizedAt === null ? null : Math.round((now-sizedAt)/1000),
                         scale:[actor.scale_x, actor.scale_y].map(v => Math.round(v*1000)/1000)})}`);
             }, 'completed', () => finish(), this);
             actor.connectObject('destroy', () => operation.cancel(),
-                'damaged', () => {lastDamage = GLib.get_monotonic_time();}, timeline);
+                'damaged', () => {
+                    lastDamage = GLib.get_monotonic_time();
+                    if (draws.length < 64)
+                        draws.push(lastDamage);
+                }, timeline);
             window.connectObject?.('unmanaging', () => operation.cancel(), timeline);
             timeline.start();
         });
+    }
+    // Finish observing the follow-up window after the morph has ended: keep
+    // recording draws until MORPH_FOLLOW_WINDOW_MS after the first frame at
+    // the final size, then learn. Stops quietly if the window closes.
+    // A maximize ends the observation early: the app's redraw for the new
+    // state is not a layout follow-up. Then only a follow-up already seen
+    // is learned.
+    _observeFollowUp(window, actor, sizedAt, draws, from, to) {
+        if (sizedAt === null || (from.width === to.width && from.height === to.height))
+            return;
+        const remaining = Math.ceil((sizedAt + MORPH_FOLLOW_WINDOW_MS*1000 - GLib.get_monotonic_time())/1000);
+        if (remaining <= 0) {
+            this._learnFollowUp(window, sizedAt, draws, from, to, true);
+            return;
+        }
+        const timeline = new Clutter.Timeline({actor, duration: remaining});
+        const stop = () => {
+            this._learners.delete(stop);
+            if (this._learnerByWindow.get(window) === interrupt)
+                this._learnerByWindow.delete(window);
+            timeline.disconnectObject(this);
+            actor.disconnectObject(timeline);
+            window.disconnectObject?.(timeline);
+            timeline.stop();
+        };
+        const interrupt = () => {
+            stop();
+            this._learnFollowUp(window, sizedAt, draws, from, to, false);
+        };
+        this._learners.add(stop);
+        this._learnerByWindow.set(window, interrupt);
+        actor.connectObject('damaged', () => {
+            if (draws.length < 64)
+                draws.push(GLib.get_monotonic_time());
+        }, 'destroy', stop, timeline);
+        window.connectObject?.('unmanaging', stop, timeline);
+        timeline.connectObject('completed', () => {
+            stop();
+            this._learnFollowUp(window, sizedAt, draws, from, to, true);
+        }, this);
+        timeline.start();
+    }
+    // After a morph: how long after its first frame at the final size did the
+    // app keep drawing? Draws within 3 ms form one burst; the latest burst
+    // starting within MORPH_FOLLOW_WINDOW_MS is the follow-up. No sample is
+    // taken for same-size moves, or when the window ended before a missing
+    // follow-up could be ruled out. The estimate rises at once and decays
+    // slowly, so an occasional snap without a follow-up does not cut it short.
+    _learnFollowUp(window, sizedAt, draws, from, to, complete) {
+        if (sizedAt === null || (from.width === to.width && from.height === to.height))
+            return;
+        let follow = null;
+        let burst = null;
+        for (const at of draws) {
+            if (at <= sizedAt+1000)
+                continue;
+            if (burst === null || at-burst.last > 3000)
+                burst = {start: at};
+            burst.last = at;
+            const delay = (burst.start-sizedAt)/1000;
+            if (delay <= MORPH_FOLLOW_WINDOW_MS)
+                follow = delay;
+        }
+        if (follow === null && !complete)
+            return;
+        follow ??= 0;
+        const previous = this._followUp.get(window);
+        this._followUp.set(window, previous === undefined || follow > previous
+            ? follow : previous + 0.25*(follow-previous));
+        this._trace(window, 'follow-up', {sample: Math.round(follow), learned: Math.round(this._followUp.get(window))});
     }
     // The window frame as currently drawn: the actor's own geometry (synced
     // only when the client's new buffer is shown) minus Mutter's current
@@ -780,6 +892,8 @@ export default class KeyboardMonitorSnap extends Extension {
             coversAll: morph,
             snapshot: () => cover,
             coverState: () => {
+                // The app's redraw for the new state is not a follow-up.
+                this._learnerByWindow.get(window)?.();
                 if (!enabled() || stateCover) return;
                 let content;
                 try {
@@ -1072,6 +1186,8 @@ export default class KeyboardMonitorSnap extends Extension {
     }
     disable() {
         this._enabled = false;
+        for (const stop of [...(this._learners ?? [])])
+            stop();
         Main.layoutManager.disconnectObject(this);
         this._cancelOperations();
         for (const window of [...(this._visuals?.keys() ?? [])])
