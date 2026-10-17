@@ -9,7 +9,7 @@ import {anchorFor} from '../placement.js';
 const root = Gio.File.new_for_uri(import.meta.url).get_parent().get_parent().get_path();
 const text = new TextDecoder().decode(GLib.file_get_contents(`${root}/extension.js`)[1]);
 const setup = `
-export const mock = {redraws:0, widgets:[], later:[], missingKeys:new Set(), missingSchemas:new Set(), lateUnmaximize:0, halfEase:false, lateSizeChange:false, monitors:2, invalidMonitorCalls:[], clock:0, ints:{'animation-duration':120,'max-stretch':3,'morph-fade':70}, timelines:[], focus:null,
+export const mock = {redraws:0, widgets:[], later:[], missingKeys:new Set(), missingSchemas:new Set(), lateUnmaximize:0, halfEase:false, lateSizeChange:false, monitors:2, invalidMonitorCalls:[], clock:0, ints:{}, slowDown:1, timelines:[], focus:null,
  neighbor:-1, bindings:new Map(), values:new Map(), defaults:new Map(), resets:[], handler:{}, grab:null,
  timers:new Map(), pending:[], nativeEffects:0, skippedEffects:0};
 export function signals(o) {
@@ -49,13 +49,17 @@ class Extension {getSettings() {return new Settings();}}
 const Meta = {WindowClientType:{WAYLAND:0, X11:1}, DisplayDirection:{LEFT:0, RIGHT:1, UP:2, DOWN:3},
  KeyBindingFlags:{IGNORE_AUTOREPEAT:1}, MaximizeFlags:{BOTH:3}};
 const Shell = {ActionMode:{NORMAL:1}};
-const St = {Settings:{get:() => ({enable_animations:true, slow_down_factor:1})},
+const St = {Settings:{get:() => ({enable_animations:true, slow_down_factor:mock.slowDown})},
  // Snapshot widgets record where they were drawn and whether they are gone.
  Widget:class {
   constructor() {this.opacity = 255; this.destroyed = false; this.moves = []; mock.widgets.push(this);}
   set_position(x, y) {this.x = x; this.y = y;}
   set_size(width, height) {this.width = width; this.height = height; this.moves.push({x:this.x, y:this.y, width, height});}
-  set_clip(x, y, width, height) {this.clip = {x, y, width, height};}
+  set_clip(x, y, width, height) {
+   this.clip = {x, y, width, height};
+   // The outline on screen: the clip in stage coordinates.
+   (this.outline ??= []).push({x:this.x+x, y:this.y+y, width, height});
+  }
   ease(p) {if ('opacity' in p) this.opacity = p.opacity; p.onStopped?.();}
   destroy() {this.destroyed = true; this.opacityAtDestroy = this.opacity;}
  }};
@@ -290,7 +294,7 @@ const clean = (w, label, {busy = true} = {}) => {
 const fresh = opts => {
     const w = makeWindow(opts);
     win = w; mock.focus = w; mock.neighbor = -1;
-    e._states.delete(w); e._latency.delete(w); e._redraw.delete(w);
+    e._states.delete(w);
     return w;
 };
 
@@ -313,89 +317,6 @@ const fresh = opts => {
     await Promise.all([up, left, down, last]);
     assert(w.frame.width === 500 && w.frame.height === 800, 'Up, Left, Down, Left ends on the left half');
     clean(w, 'interrupted hold');
-}
-
-// 2. Latency matches the client's real 40 ms lag; samples are taken only on
-// new drawn sizes, so re-sent targets cannot pull the estimate down.
-{
-    const w = fresh({frame:{x:0, y:0, width:500, height:800}});
-    e._states.set(w, {layout:{x:'left', y:null}, monitor:0, rect:{x:0, y:0, width:500, height:800}, frame:{x:0, y:0, width:500, height:800}});
-    const samples = [];
-    const real = e._sample.bind(e);
-    e._sample = (map, win_, ms) => {if (map === e._latency) samples.push(ms); real(map, win_, ms);};
-    for (const dir of ['right', 'right', 'left', 'left', 'right', 'right']) {
-        const p = press(dir);
-        await settle(600);
-        await p;
-    }
-    e._sample = real;
-    assert(samples.length >= 10, 'latency sampled during motions');
-    assert(samples.every(ms => ms >= 39 && ms <= 45), `every latency sample near 40 ms (got ${samples.map(Math.round)})`);
-    assert(Math.abs(e._lead(w)-40) <= 5, 'look-ahead converges on the real lag');
-    clean(w, 'latency');
-}
-
-// 2b. A client whose lag jitters (20-60 ms): the look-ahead aims at the
-// fast end, so drawn content rarely gets ahead of the curve.
-{
-    let seed = 7;
-    const rand = () => (seed = (seed*1103515245 + 12345) % 2147483648) / 2147483648;
-    const w = fresh({frame:{x:0, y:0, width:500, height:800}, lag:() => 20 + 40*rand()});
-    e._states.set(w, {layout:{x:'left', y:null}, monitor:0, rect:{x:0, y:0, width:500, height:800}, frame:{x:0, y:0, width:500, height:800}});
-    let ahead = 0, frames = 0;
-    const real = e._showAt.bind(e);
-    e._showAt = (w_, actor, r, shape) => {
-        real(w_, actor, r, shape);
-        // Growing or shrinking width: content ahead means past the curve.
-        if (shape.growth?.x) {
-            frames++;
-            if (shape.growth.x*(w_.drawn.width - r.width) > 1) ahead++;
-        }
-    };
-    for (const dir of ['right', 'right', 'left', 'left', 'right', 'right', 'left', 'left']) {
-        const p = press(dir);
-        await settle(600);
-        await p;
-    }
-    e._showAt = real;
-    assert(e._latencySpread.get(w) > 3, 'lag variation measured');
-    assert(e._lead(w) < e._latency.get(w), 'look-ahead aims below the mean lag');
-    assert(frames > 50 && ahead/frames < 0.05, `content ahead of the curve on under 5% of frames (${ahead}/${frames})`);
-    clean(w, 'jittery lag');
-}
-
-// 3. Same-size moves (crossing between equal monitors) give no samples.
-{
-    const w = fresh({frame:{x:500, y:0, width:500, height:800}});
-    mock.neighbor = 1;
-    e._states.set(w, {layout:{x:'right', y:null}, monitor:0, rect:{x:500, y:0, width:500, height:800}, frame:{x:500, y:0, width:500, height:800}});
-    e._latency.set(w, 40);
-    const samples = [];
-    const real = e._sample.bind(e);
-    e._sample = (map, win_, ms) => {samples.push(ms); real(map, win_, ms);};
-    const p = press('right');
-    await settle(600);
-    await p;
-    e._sample = real;
-    assert(w.frame.x === 1000 && w.frame.width === 500, 'right half crosses to the next monitor\'s left half');
-    assert(samples.length === 0, 'a same-size crossing records no latency or redraw samples');
-    assert(e._latency.get(w) === 40, 'estimate untouched by a pure move');
-    clean(w, 'same-size crossing');
-}
-
-// 4. Requests never move backwards when the estimate drops mid-motion.
-{
-    const w = fresh({frame:{x:0, y:0, width:500, height:800}});
-    e._states.set(w, {layout:{x:'left', y:null}, monitor:0, rect:{x:0, y:0, width:500, height:800}, frame:{x:0, y:0, width:500, height:800}});
-    e._latency.set(w, 80);
-    const p = press('right');
-    for (let i = 0; i < 6; i++) await step(4);
-    e._latency.set(w, 0);
-    await settle(600);
-    await p;
-    const widths = w.requests.map(r => r.width);
-    assert(widths.every((v, i) => i === 0 || v >= widths[i-1]), `growing requests stay monotonic after a latency drop (${widths})`);
-    clean(w, 'monotonic requests');
 }
 
 // 5. Closing mid-motion stops all driving at once, without an error.
@@ -470,23 +391,6 @@ const fresh = opts => {
     w.resizable = false;
     await e._run(w, ['right']);
     assert(!e._states.has(w), 'superseded state cleared when the window rejects resizing');
-}
-
-// 10. The cover fade maps the restored floating frame exactly; the cap
-// applies afterwards.
-{
-    const w = fresh({frame:{...AREAS[0]}, maximized:true});
-    const shapes = [];
-    const real = e._showAt.bind(e);
-    e._showAt = (w_, actor, r, shape) => {shapes.push({at:mock.clock, cap:shape.maxStretch}); real(w_, actor, r, shape);};
-    const start = mock.clock;
-    const p = press('left');
-    await settle(600);
-    await p;
-    e._showAt = real;
-    assert(shapes.some(s => s.cap === null && s.at-start < 120000), 'exact mapping while the cover fades');
-    assert(shapes.filter(s => s.at-start > 140000).every(s => s.cap === 0.03), 'shipped 3% cap afterwards');
-    clean(w, 'cover fade');
 }
 
 // 11. Disable restores only keys still holding what we wrote, and resets
@@ -621,8 +525,8 @@ for (const signal of [true, false]) {
     w.floating = {x:100, y:100, width:600, height:400};
     mock.lateUnmaximize = 2;
     const froms = [];
-    const real = e._animate.bind(e);
-    e._animate = (w_, from, ...rest) => {froms.push({...from}); return real(w_, from, ...rest);};
+    const real = e._reveal.bind(e);
+    e._reveal = (w_, from, ...rest) => {froms.push({...from}); return real(w_, from, ...rest);};
     const p1 = press('left');
     assert(w.actor.opacity === 0, 'cover hides the window while it unmaximizes');
     // Step until Mutter has restored the floating frame, then press again
@@ -632,7 +536,7 @@ for (const signal of [true, false]) {
     const p2 = press('down');
     await settle(800);
     await Promise.all([p1, p2]);
-    e._animate = real;
+    e._reveal = real;
     mock.lateUnmaximize = 0;
     assert(w.actor.opacity === 255, 'window visible after an interrupted cover');
     assert(froms.length === 1 && froms[0].x === 0 && froms[0].width === 1000 && froms[0].height === 800,
@@ -681,7 +585,7 @@ for (const signal of [true, false]) {
     w.drawn = {...w.frame};
     e._states.set(w, {layout:{x:'left', y:null}, monitor:0, rect:{x:0, y:0, width:500, height:800}, frame:{x:0, y:0, width:500, height:800}});
     e._visuals.set(w, {rect:{x:0, y:0, width:520, height:800}});
-    e._hold(w, w.actor, {x:0, y:0, width:500, height:800}, {anchor:{x:0, y:0}, maxStretch:0.06, growth:{x:1, y:0}});
+    e._hold(w, w.actor, {x:0, y:0, width:500, height:800}, {x:0, y:0});
     mock.halfEase = true;
     w.actor.scale_x = 1.04;
     e._clearVisual(w, true, w.actor);
@@ -689,106 +593,80 @@ for (const signal of [true, false]) {
     const displayed = e._displayedRect(w);
     assert(displayed && displayed.width === 510, 'relax half way is drawn 510 px wide');
     const froms = [];
-    const real = e._animate.bind(e);
-    e._animate = (w_, from, ...rest) => {froms.push({...from}); return real(w_, from, ...rest);};
+    const real = e._reveal.bind(e);
+    e._reveal = (w_, from, ...rest) => {froms.push({...from}); return real(w_, from, ...rest);};
     const p = press('right');
     await settle(800);
     await p;
-    e._animate = real;
+    e._reveal = real;
     assert(froms[0].width === 510, 'motion starts from the drawn, half-relaxed rectangle');
     clean(w, 'interrupted relax');
 }
 
-// 20. Exact mapping from a cover fade is not inherited by the next motion.
-{
-    const w = fresh({frame:{...AREAS[0]}, maximized:true});
-    const caps = [];
-    const real = e._showAt.bind(e);
-    let second = false;
-    e._showAt = (w_, actor, r, shape) => {if (second) caps.push(shape.maxStretch); real(w_, actor, r, shape);};
-    const p1 = press('left');
-    for (let i = 0; i < 6; i++) await step(4);
-    second = true;
-    const p2 = press('down');
-    await settle(800);
-    await Promise.all([p1, p2]);
-    e._showAt = real;
-    assert(caps.length > 3 && caps.every(c => c === 0.03), 'an interrupting motion uses the 3% cap from its first frame');
-    clean(w, 'exact mapping scope');
-}
-// ---- Morph style ----
-const morphStyle = on => mock.values.set('custom:animation-style', on ? 'morph' : 'live');
+// ---- The animation ----
 const halfState = w => e._states.set(w, {layout:{x:'left', y:null}, monitor:0,
     rect:{x:0, y:0, width:500, height:800}, frame:{x:0, y:0, width:500, height:800}});
 
-// 21. Left half -> Right -> full with a 40 ms client: the snapshot follows
-// the curve every frame, the app gets one request, and the live window only
-// appears once it has drawn the final size.
+// 21. Left half -> Right -> full with a 40 ms client: the outline grows
+// along the curve every frame, the app gets one request, and the snapshot,
+// backdrop and maximize cover are all removed at the end.
 {
-    morphStyle(true);
     const w = fresh({frame:{x:0, y:0, width:500, height:800}});
     halfState(w);
     mock.widgets = [];
-    const start = mock.clock;
-    const samples = [];
     const p = press('right');
-    for (let i = 0; i < 60; i++) {
-        await step(4);
-        samples.push({at:(mock.clock-start)/1000, opacity:w.actor.opacity, drawnFull:w.drawn.width === 1000});
-    }
     await settle(600);
     await p;
-    const snap = mock.widgets[0];
-    // The morph's snapshot, plus one covering the maximize at the end.
-    assert(mock.widgets.length === 2, 'morph snapshot plus maximize cover');
-    const widths = snap.moves.map(m => m.width);
-    assert(widths.length > 20 && widths.every((v, i) => i === 0 || v >= widths[i-1]), 'snapshot grows along the curve every frame');
-    assert(widths.at(-1) === 1000, 'snapshot reaches the target size');
+    const outline = mock.widgets[0].outline.map(m => m.width);
+    assert(outline.length > 20 && outline.every((v, i) => i === 0 || v >= outline[i-1]), 'outline grows along the curve every frame');
+    assert(outline.at(-1) === 1000, 'outline reaches the target size');
     assert(w.requests.length === 1 && w.requests[0].width === 1000, 'the app receives a single request for its final size');
-    assert(samples.filter(s => !s.drawnFull).every(s => s.opacity === 0), 'live window hidden until the app has drawn the final size');
-    assert(samples.some(s => s.drawnFull && s.opacity === 255), 'live window shown once drawn');
-    assert(snap.destroyed && snap.opacityAtDestroy === 0, 'snapshot faded out, not cut');
-    assert(mock.widgets[1].destroyed, 'maximize cover removed');
-    assert(w.maximizedHorizontally && w.maximizedVertically, 'morph to full still maximizes natively');
-    clean(w, 'morph');
+    assert(mock.widgets.length === 3 && mock.widgets.every(x => x.destroyed), 'snapshot, backdrop and maximize cover removed');
+    assert(w.maximizedHorizontally && w.maximizedVertically, 'ending full still maximizes natively');
+    clean(w, 'animation');
 }
 
-// Watch a morph: when the live window first shows, its content then, the
-// snapshot's path, re-aims, and the hold target.
+// Watch an animation: when the handover starts (the snapshot on top starts
+// fading, or the window above the snapshot starts appearing) and the app's
+// content then, when that fade has finished, the outline's path, re-aims,
+// and the hold target.
 async function watchMorph(w, dir, {stepMs = 4, steps = 80} = {}) {
     mock.widgets = [];
     const result = {shownAt:null, content:null, reaims:[], holds:[], goneAt:null, landedAt:null};
     const realTrace = e._trace.bind(e), realHold = e._hold.bind(e);
-    e._trace = (w_, phase, extra) => {if (phase === 'morph-reaim') result.reaims.push(extra); realTrace(w_, phase, extra);};
+    e._trace = (w_, phase, extra) => {if (phase === 'reaim') result.reaims.push(extra); realTrace(w_, phase, extra);};
     // The hold starts on the motion's last frame: that is when it lands.
-    e._hold = (w_, actor, target, shape) => {
+    e._hold = (w_, actor, target, anchor) => {
         result.holds.push({...target});
         result.landedAt ??= (mock.clock-start)/1000;
-        realHold(w_, actor, target, shape);
+        realHold(w_, actor, target, anchor);
     };
     const start = mock.clock;
     const p = press(dir);
     for (let i = 0; i < steps; i++) {
         await step(stepMs);
-        if (result.shownAt === null && w.actor.opacity === 255 && e._visuals.has(w)) {
+        const snap = mock.widgets[0];
+        if (!snap || !snap.clip) continue;
+        const growing = !snap.below;
+        const started = growing ? snap.opacity < 255 || snap.destroyed : w.actor.opacity > 0 || snap.destroyed;
+        const done = growing ? snap.opacity === 0 || snap.destroyed : w.actor.opacity === 255 || snap.destroyed;
+        if (result.shownAt === null && started) {
             result.shownAt = (mock.clock-start)/1000;
             result.content = w.content;
             // How long after the app's first frame at the new size.
             result.afterSized = w.sizedDrawAt === undefined ? null : (mock.clock-w.sizedDrawAt)/1000;
         }
-        // When the snapshot first became fully transparent (or was removed).
-        const snap = mock.widgets[0];
-        if (result.goneAt === null && snap && (snap.opacity === 0 || snap.destroyed))
+        if (result.goneAt === null && result.shownAt !== null && done)
             result.goneAt = (mock.clock-start)/1000;
     }
     await settle(800);
     await p;
     e._trace = realTrace; e._hold = realHold;
-    result.moves = mock.widgets[0]?.moves ?? [];
+    result.moves = mock.widgets[0]?.outline ?? [];
     return result;
 }
 const fullState = w => e._states.set(w, {layout:{x:null, y:null}, monitor:0, rect:{...AREAS[0]}, frame:{...AREAS[0]}});
-// Largest change in per-frame speed of the snapshot's width: smooth easing
+// Largest change in per-frame speed of the outline's width: smooth easing
 // changes it by a pixel or two, a jump shows as a spike.
 const maxJump = moves => {
     const speed = moves.slice(1).map((m, i) => m.width-moves[i].width);
@@ -796,7 +674,7 @@ const maxJump = moves => {
 };
 
 // 22. A minimum-size app (700 px) asked for 500 px: once it draws 700 px,
-// the morph re-aims there smoothly, hands over after the content goes
+// the animation re-aims there smoothly, hands over after the content goes
 // quiet, and holds at 700 px, so nothing is squeezed and relaxed afterwards.
 {
     const w = fresh({frame:{...AREAS[0]}, lag:20});
@@ -805,17 +683,17 @@ const maxJump = moves => {
     const r = await watchMorph(w, 'left', {stepMs:2, steps:120});
     assert(r.reaims.length === 1 && r.reaims[0].why === 'drawn' && r.reaims[0].to.width === 700,
         `re-aimed at the drawn 700 px (${JSON.stringify(r.reaims)})`);
-    assert(r.moves.at(-1).width === 700, 'snapshot ends at the granted 700 px');
+    assert(r.moves.at(-1).width === 700, 'outline ends at the granted 700 px');
     assert(maxJump(r.moves) <= 12, `snapshot path continuous through the re-aim (largest speed change ${maxJump(r.moves)} px/frame)`);
     // Drawn at 20 ms, quiet for 24 ms: about 44 ms (60% of 90 ms is 54 ms).
     assert(r.shownAt !== null && r.shownAt >= 42 && r.shownAt <= 50, `handover once drawn and quiet (at ${r.shownAt} ms)`);
     assert(r.holds.length === 1 && r.holds[0].width === 700, 'hold at the granted size: no squeeze and relax');
     assert(mock.widgets.every(x => x.destroyed), 'snapshot gone');
-    clean(w, 'morph minimum size');
+    clean(w, 'minimum size');
 }
 
 // 22a. From maximized, the app draws its restored floating size only after
-// the morph has started. That is not an answer to the request and must not
+// the animation has started. That is not an answer to the request and must not
 // be re-aimed at (it sits on the target's top-left edges).
 {
     const w = fresh({frame:{...AREAS[0]}, maximized:true, lag:30});
@@ -823,8 +701,8 @@ const maxJump = moves => {
     w.floatingLag = 12;
     const r = await watchMorph(w, 'left', {stepMs:2, steps:120});
     assert(r.reaims.length === 0, `no re-aim at the late floating size (${JSON.stringify(r.reaims)})`);
-    assert(r.moves.at(-1).width === 500 && r.moves.at(-1).height === 800, 'snapshot ends at the left half');
-    clean(w, 'morph late floating');
+    assert(r.moves.at(-1).width === 500 && r.moves.at(-1).height === 800, 'outline ends at the left half');
+    clean(w, 'late floating');
 }
 
 // 22b. An X11-style app, whose Mutter frame changes at once: nothing to
@@ -835,8 +713,8 @@ const maxJump = moves => {
     fullState(w);
     const r = await watchMorph(w, 'left');
     assert(r.reaims.length === 0, 'no re-aim when the granted size is the requested one');
-    assert(r.moves.at(-1).width === 500, 'snapshot ends at the requested size');
-    clean(w, 'morph X11 frame');
+    assert(r.moves.at(-1).width === 500, 'outline ends at the requested size');
+    clean(w, 'X11 frame');
 }
 
 // 22c. A very slow app (300 ms): the live window fades in at 60% anyway.
@@ -844,67 +722,54 @@ const maxJump = moves => {
     const w = fresh({frame:{...AREAS[0]}, lag:300});
     fullState(w);
     const r = await watchMorph(w, 'left');
-    // Full -> left half lasts 90 ms; 60% is 54 ms.
-    assert(r.shownAt !== null && r.shownAt <= 62, `slow app: handover at 60% of the motion (at ${r.shownAt} ms)`);
+    // Full -> left half lasts 90 ms; 60% is 54 ms. A shrinking handover fades
+    // the window in from transparent, so it is seen one 4 ms step later.
+    assert(r.shownAt !== null && r.shownAt <= 66, `slow app: handover at 60% of the motion (at ${r.shownAt} ms)`);
     assert(r.reaims.length === 0 && r.moves.at(-1).width === 500,
-        'slow app: no re-aim at the unanswered old size; snapshot ends at the requested size');
+        'slow app: no re-aim at the unanswered old size; outline ends at the requested size');
     // Handover at 54 ms of a 90 ms motion: the fade must end by 90% of it,
     // a few frames before landing, not run 70 ms past it.
     assert(r.goneAt !== null && r.goneAt <= r.landedAt-6,
         `late handover: snapshot gone before the window lands (gone ${r.goneAt} ms, landed ${r.landedAt} ms)`);
-    clean(w, 'morph slow app');
+    clean(w, 'slow app');
 }
 
 // 22d. Chromium-style relayout: the first frame at the new size still has
 // the old layout; the handover waits for the re-laid-out frame. A 240 ms
 // base (180 ms motion, fallback at 108 ms) keeps the two apart.
 {
-    mock.ints['animation-duration'] = 240;
+    mock.slowDown = 2;
     const w = fresh({frame:{x:0, y:0, width:500, height:800}, lag:20});
     w.relayout = 10;
     halfState(w);
     const r = await watchMorph(w, 'right', {stepMs:2, steps:120});
-    mock.ints['animation-duration'] = 120;
+    mock.slowDown = 1;
     assert(r.content === 'laid-out', `handed over only after the re-layout (saw ${r.content})`);
     // Drawn at 20 ms, re-laid out at 30 ms, then 24 ms quiet: about 54 ms.
     assert(r.shownAt >= 52 && r.shownAt <= 60, `handover once content went quiet (at ${r.shownAt} ms)`);
-    clean(w, 'morph relayout');
+    clean(w, 'relayout');
 }
 
 // 22e. Constant redraws (video): never quiet, so the handover is at 60%.
 {
-    mock.ints['animation-duration'] = 240;
+    mock.slowDown = 2;
     const w = fresh({frame:{x:0, y:0, width:500, height:800}, lag:20});
     w.video = true;
     halfState(w);
     const r = await watchMorph(w, 'right', {stepMs:2, steps:120});
     w.video = false;
-    mock.ints['animation-duration'] = 120;
+    mock.slowDown = 1;
     assert(r.shownAt >= 106 && r.shownAt <= 112, `video: handover at 60% of the motion (at ${r.shownAt} ms)`);
     // 180 ms motion: the fade ends by 90% of it, well before landing.
     assert(r.goneAt !== null && r.goneAt <= r.landedAt-14,
         `video: snapshot gone before the window lands (gone ${r.goneAt} ms, landed ${r.landedAt} ms)`);
-    clean(w, 'morph video');
-}
-
-// 22f. morph-fade 0: the snapshot is swapped for the live window in one
-// frame at the handover; 30: the fade lasts about 30 ms.
-for (const [fade, label] of [[0, 'instant swap'], [30, '30 ms fade']]) {
-    mock.ints['morph-fade'] = fade;
-    const w = fresh({frame:{...AREAS[0]}, lag:20});
-    fullState(w);
-    const r = await watchMorph(w, 'left', {stepMs:2, steps:120});
-    mock.ints['morph-fade'] = 70;
-    const span = r.goneAt-r.shownAt;
-    assert(fade === 0 ? span === 0 : span >= 26 && span <= 34, `${label}: snapshot gone ${span} ms after the handover`);
-    clean(w, `morph ${label}`);
+    clean(w, 'video');
 }
 
 // 22g. Maximizing at the end: the app's first maximized frame is laid out
 // for the old margins (shifted). A snapshot of the landed window covers the
 // maximize until the corrected frame has settled, in both styles.
-for (const style of ['morph', 'live']) {
-    morphStyle(style === 'morph');
+for (const style of ['reveal']) {
     const w = fresh({frame:{x:0, y:0, width:1000, height:400}, lag:10});
     w.maximizeGlitch = 10;
     e._states.set(w, {layout:{x:null, y:'up'}, monitor:0, rect:{x:0, y:0, width:1000, height:400},
@@ -932,8 +797,6 @@ for (const style of ['morph', 'live']) {
     assert(mock.widgets.every(x => x.destroyed), `${style}: all snapshots removed`);
     clean(w, `${style} maximize cover`);
 }
-morphStyle(true);
-
 // 22h. An app that does not redraw on maximize: the cover is removed at its
 // time limit. A maximize slower than that limit does not hang the snap.
 for (const [opts, label] of [[{quietMaximize:true}, 'no redraw'], [{lateMaximize:45}, 'slow maximize']]) {
@@ -975,7 +838,7 @@ for (const [opts, label] of [[{quietMaximize:true}, 'no redraw'], [{lateMaximize
 // size. The first snap learns the delay; later snaps hand over only after
 // the corrected frame. A 160 ms base keeps the 75% fallback clear of it.
 {
-    mock.ints['animation-duration'] = 160;
+    mock.slowDown = 1.33333;
     const w = fresh({frame:{x:0, y:0, width:500, height:800}, lag:15});
     w.relayout = 43;
     halfState(w);
@@ -986,7 +849,7 @@ for (const [opts, label] of [[{quietMaximize:true}, 'no redraw'], [{lateMaximize
         // Settle the maximize/unmaximize so the next snap starts tracked.
         await settle(200);
     }
-    mock.ints['animation-duration'] = 120;
+    mock.slowDown = 1;
     const learned = e._followUp.get(w);
     assert(Math.abs(learned-43) <= 4, `follow-up delay learned (${learned} ms)`);
     assert(runs[0].content === 'stale', 'first snap: not learned yet, handed over before the follow-up');
@@ -1014,13 +877,13 @@ for (const [opts, label] of [[{quietMaximize:true}, 'no redraw'], [{lateMaximize
 // lands at about 61 ms, after the 60% point (about 58 ms with start-up) but
 // before the 75% fallback used for windows that draw a follow-up.
 {
-    mock.ints['animation-duration'] = 120;
+    mock.slowDown = 1;
     const w = fresh({frame:{x:0, y:0, width:500, height:800}, lag:15});
     w.relayout = 43;
     e._followUp.set(w, 43);
     halfState(w);
     const r = await watchMorph(w, 'right', {stepMs:2, steps:140});
-    mock.ints['animation-duration'] = 120;
+    mock.slowDown = 1;
     w.relayout = 0;
     assert(r.content === 'laid-out', `follow-up window: fallback late enough for the corrected frame (saw ${r.content} at ${r.shownAt} ms)`);
     clean(w, 'follow-up fallback');
@@ -1044,7 +907,7 @@ for (const [opts, label] of [[{quietMaximize:true}, 'no redraw'], [{lateMaximize
 // 22l. The learned wait is capped at 60 ms: a 70 ms follow-up does not
 // delay the handover further.
 {
-    mock.ints['animation-duration'] = 240;
+    mock.slowDown = 2;
     const w = fresh({frame:{x:0, y:0, width:500, height:800}, lag:15});
     w.relayout = 70;
     halfState(w);
@@ -1053,7 +916,7 @@ for (const [opts, label] of [[{quietMaximize:true}, 'no redraw'], [{lateMaximize
         runs.push(await watchMorph(w, dir, {stepMs:2, steps:160}));
         await settle(200);
     }
-    mock.ints['animation-duration'] = 120;
+    mock.slowDown = 1;
     assert(e._followUp.get(w) >= 66, `70 ms follow-up learned (${e._followUp.get(w)})`);
     assert(runs.slice(1).every(r => r.afterSized >= 66 && r.afterSized <= 72),
         `handover capped at 60 + 8 ms after the first frame (${runs.map(r => r.afterSized)})`);
@@ -1061,7 +924,7 @@ for (const [opts, label] of [[{quietMaximize:true}, 'no redraw'], [{lateMaximize
     clean(w, 'follow-up cap');
 }
 
-// ---- Reveal style ----
+// ---- Reveal details: crop, layers, alignment ----
 // Sample every frame: the snapshot's size and clip, and where and how the
 // live window is drawn (unscaled, cropped) once it is visible.
 async function watchReveal(w, dir, steps = 120) {
@@ -1089,7 +952,6 @@ async function watchReveal(w, dir, steps = 120) {
 // own size and is cropped by the moving edge, never squished; the live
 // window appears unscaled and cropped, its left edge on the outline's.
 {
-    mock.values.set('custom:animation-style', 'reveal');
     const w = fresh({frame:{...AREAS[0]}, lag:20});
     fullState(w);
     // The motion's end hands over to the hold, which may scale the window:
@@ -1185,14 +1047,12 @@ async function watchReveal(w, dir, steps = 120) {
     await settle(300);
     await p3;
     clean(c, 'reveal closed');
-    mock.values.set('custom:animation-style', 'morph');
 }
 
 // 22p. Crossing monitors repaints the window layer on every frame (and at
 // the end) in every style, so nothing is left behind on the monitor the
 // window leaves; moves within a monitor do not.
-for (const style of ['reveal', 'morph', 'live']) {
-    mock.values.set('custom:animation-style', style);
+for (const style of ['reveal']) {
     const w = fresh({frame:{x:500, y:0, width:500, height:800}, lag:15});
     mock.neighbor = 1;
     e._states.set(w, {layout:{x:'right', y:null}, monitor:0, rect:{x:500, y:0, width:500, height:800}, frame:{x:500, y:0, width:500, height:800}});
@@ -1213,9 +1073,7 @@ for (const style of ['reveal', 'morph', 'live']) {
     assert(mock.redraws === 0, `${style}: no extra repaints within one monitor`);
     clean(v, `${style} same-monitor`);
 }
-mock.values.set('custom:animation-style', 'morph');
-
-// 23. Closing mid-morph removes the snapshot and stops driving the window.
+// 23. Closing mid-animation removes the snapshot and stops driving the window.
 {
     const w = fresh({frame:{x:0, y:0, width:500, height:800}});
     halfState(w);
@@ -1227,12 +1085,12 @@ mock.values.set('custom:animation-style', 'morph');
     await settle(300);
     let failed = null;
     await p.catch(error => {failed = error;});
-    assert(!failed && mock.widgets.every(x => x.destroyed), 'closed mid-morph: no error, snapshot removed');
-    clean(w, 'morph closed');
+    assert(!failed && mock.widgets.every(x => x.destroyed), 'closed mid-animation: no error, snapshots removed');
+    clean(w, 'closed mid-animation');
 }
 
-// 24. Interrupting a morph continues from the drawn rectangle and leaves no
-// snapshot behind.
+// 24. Interrupting an animation continues from the drawn rectangle and
+// leaves no snapshot behind.
 {
     const w = fresh({frame:{x:0, y:0, width:500, height:800}});
     halfState(w);
@@ -1244,14 +1102,16 @@ mock.values.set('custom:animation-style', 'morph');
     await settle(800);
     await Promise.all([p1, p2]);
     assert(w.frame.x === 500 && w.frame.width === 500, 'left half, Right, Right ends on the right half');
-    const second = mock.widgets[1];
+    // Growing: snapshot then backdrop for the first motion; the second
+    // snapshot is the next widget created.
+    const second = mock.widgets[2];
     assert(second && second.moves[0].x === seen.x && second.moves[0].width === seen.width,
         'second snapshot starts where the first motion was interrupted');
     assert(mock.widgets.every(x => x.destroyed), 'all snapshots removed');
-    clean(w, 'morph interrupted');
+    clean(w, 'interrupted');
 }
 
-// 25. From maximized, the unmaximize cover is the morph's snapshot.
+// 25. From maximized, the unmaximize cover is the animation's snapshot.
 {
     const w = fresh({frame:{...AREAS[0]}, maximized:true});
     w.floating = {x:100, y:100, width:600, height:400};
@@ -1259,25 +1119,14 @@ mock.values.set('custom:animation-style', 'morph');
     const p = press('left');
     await settle(800);
     await p;
-    assert(mock.widgets.length === 1, 'one snapshot covers both the unmaximize and the morph');
-    assert(mock.widgets[0].moves[0].width === 1000 && mock.widgets[0].moves.at(-1).width === 500, 'snapshot morphs from full to the left half');
-    clean(w, 'morph from maximized');
+    assert(mock.widgets.length === 1, 'one snapshot covers both the unmaximize and the animation');
+    // The first outline is from the first animation frame, already moving.
+    assert(mock.widgets[0].outline[0].width > 900 && mock.widgets[0].outline.at(-1).width === 500,
+        'outline goes from full to the left half');
+    assert(mock.widgets[0].moves.every(m => m.width === 1000), 'shrinking: the snapshot is cropped, never squished');
+    clean(w, 'from maximized');
 }
 
-// 26. Live style is unchanged: no snapshot for a window that is not maximized.
-{
-    morphStyle(false);
-    const w = fresh({frame:{x:0, y:0, width:500, height:800}});
-    halfState(w);
-    mock.widgets = [];
-    const p = press('right');
-    await settle(600);
-    await p;
-    // Ending full, the only snapshot is the one covering the maximize.
-    assert(mock.widgets.length === 1 && mock.widgets[0].destroyed && w.requests.length > 3,
-        'live style: no morph snapshot, continuous requests');
-    clean(w, 'live style');
-}
 print(`PASS: ${count} lifecycle assertions`);
 GLib.Source.remove(watchdog);
 } finally {GLib.unlink(path); GLib.rmdir(folder);}

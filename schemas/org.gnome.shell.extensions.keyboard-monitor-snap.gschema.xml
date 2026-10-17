@@ -4,30 +4,6 @@
     <key name="snap-right" type="as"><default>['&lt;Super&gt;Right']</default></key>
     <key name="snap-up" type="as"><default>['&lt;Super&gt;Up']</default></key>
     <key name="snap-down" type="as"><default>['&lt;Super&gt;Down']</default></key>
-    <key name="animation-duration" type="i">
-      <range min="0" max="1000"/>
-      <default>120</default>
-      <summary>Keyboard snap animation length in milliseconds (0 disables)</summary>
-    </key>
-    <key name="max-stretch" type="i">
-      <range min="0" max="100"/>
-      <default>3</default>
-      <summary>Largest stretch of a lagging window's image during snaps, in percent (0 = move only)</summary>
-    </key>
-    <key name="animation-style" type="s">
-      <choices>
-        <choice value="live"/>
-        <choice value="morph"/>
-        <choice value="reveal"/>
-      </choices>
-      <default>'reveal'</default>
-      <summary>live: the window resizes live along the curve; morph: a snapshot moves along the curve and the final layout fades in; reveal: like morph, but content is cropped by the moving edge instead of squished</summary>
-    </key>
-    <key name="morph-fade" type="i">
-      <range min="0" max="200"/>
-      <default>70</default>
-      <summary>Morph style: longest crossfade from snapshot to live window, in milliseconds (0 = instant swap)</summary>
-    </key>
     <key name="debug-logging" type="b"><default>false</default></key>
     <key name="saved-bindings" type="s"><default>''</default></key>
   </schema>

@@ -12,65 +12,56 @@ import {TilingWindowManager as Twm} from 'file:///usr/share/gnome-shell/extensio
 import {Rect} from 'file:///usr/share/gnome-shell/extensions/tiling-assistant@ubuntu.com/src/extension/utility.js';
 import {FULL, step, rectangle} from './engine.js';
 import {placeWindow, sameFrame, interpolateRect, travelDuration, visualTransform,
-    easeOutCubic, easeInOutCubic, anchorFor, growthFor} from './placement.js';
+    easeOutCubic, easeInOutCubic, anchorFor} from './placement.js';
 
 const UUID = 'tiling-assistant@ubuntu.com';
 const rect = r => ({x: r.x, y: r.y, width: r.width, height: r.height});
 // Start position of something `size` long whose anchor point (0 start edge,
 // 1 end edge, 0.5 centre) lines up with that point of the span start..size.
 const alignOn = (size, start, span, anchor) => start + anchor*span - anchor*size;
-const COVER_FADE_MS = 120;
-// Morph style: the live window fades in over this long once the app has
-// drawn its final size, or from this fraction of the motion at the latest
-// (minimum-size apps never reach the requested size).
-// The crossfade lasts up to the morph-fade setting but always ends by
-// MORPH_FADE_END of the motion (never shorter than MORPH_MIN_FADE_MS unless
-// the setting is lower), so the snapshot never lingers half-transparent
-// over a window that has already landed. morph-fade 0 swaps instantly.
-const MORPH_MIN_FADE_MS = 16;
-const MORPH_FADE_END = 0.9;
-const MORPH_READY_LIMIT = 0.6;
+// Animation length before travel scaling (see travelDuration) and GNOME's
+// slow-down factor; GNOME's "animations off" switch disables it.
+const ANIMATION_MS = 120;
+// Handover from the snapshot to the live window: the crossfade lasts up to
+// FADE_MS but always ends by FADE_END of the motion (never shorter than
+// MIN_FADE_MS), so the snapshot never lingers over a window that has landed.
+// Without a confirmed final layout the handover happens at READY_LIMIT of
+// the motion anyway (minimum-size and very slow apps).
+const FADE_MS = 70;
+const MIN_FADE_MS = 16;
+const FADE_END = 0.9;
+const READY_LIMIT = 0.6;
 // Chromium-based apps often present their first frame at a new size with
 // the old layout, then re-lay out a frame or two later. The handover waits
 // until the app has drawn the final size and then nothing new for this long.
-const MORPH_QUIET_MS = 24;
+const QUIET_MS = 24;
 // Some apps (Claude desktop) draw a follow-up frame about 40-55 ms after
 // their first frame at a new size, with the corrected layout. The delay is
-// learned per window as the MORPH_FOLLOW_PERCENTILE of its last
-// MORPH_FOLLOW_SAMPLES samples (no follow-up counts as 0): follow-ups up to
-// MORPH_FOLLOW_WINDOW_MS after the first frame count. A window known to draw one (learned delay of at least
-// MORPH_FOLLOW_MIN_MS) is handed over only after that delay (capped at
-// MORPH_FOLLOW_CAP_MS) plus MORPH_FOLLOW_QUIET_MS without drawing, and its
-// fallback handover moves to MORPH_FOLLOW_READY_LIMIT of the motion.
-const MORPH_FOLLOW_WINDOW_MS = 80;
-const MORPH_FOLLOW_SAMPLES = 12;
-const MORPH_FOLLOW_PERCENTILE = 0.75;
-const MORPH_FOLLOW_MIN_MS = 10;
-const MORPH_FOLLOW_CAP_MS = 60;
-const MORPH_FOLLOW_QUIET_MS = 8;
-const MORPH_FOLLOW_READY_LIMIT = 0.75;
-// A re-aimed morph glides its end point to the new target over this long
+// learned per window as the FOLLOW_PERCENTILE of its last FOLLOW_SAMPLES
+// samples (no follow-up counts as 0); follow-ups up to FOLLOW_WINDOW_MS
+// after the first frame count. A window known to draw one (learned delay of
+// at least FOLLOW_MIN_MS) is handed over only after that delay (capped at
+// FOLLOW_CAP_MS) plus FOLLOW_QUIET_MS without drawing, and its fallback
+// handover moves to FOLLOW_READY_LIMIT of the motion.
+const FOLLOW_WINDOW_MS = 80;
+const FOLLOW_SAMPLES = 12;
+const FOLLOW_PERCENTILE = 0.75;
+const FOLLOW_MIN_MS = 10;
+const FOLLOW_CAP_MS = 60;
+const FOLLOW_QUIET_MS = 8;
+const FOLLOW_READY_LIMIT = 0.75;
+// A re-aimed animation glides its end point to the new target over this long
 // (eased at both ends), so neither position nor speed jumps.
-const MORPH_REAIM_MS = 40;
+const REAIM_MS = 40;
 // Maximizing is covered by a snapshot of the landed window until the app has
 // drawn its maximized frame and gone quiet, or this long at most.
 const STATE_COVER_MAX_MS = 150;
-// Confirmation checks run about once per frame, starting immediately, so a
-// state that is already true settles in one frame instead of two 25 ms polls.
+// Confirmation checks run about once per frame, starting immediately.
 const SETTLE_POLL_MS = 16;
 // After the motion, a lagging client is held visually on target this long
 // while it finishes resizing, then its transform relaxes over RELAX_MS.
 const VISUAL_HOLD_MS = 150;
 const RELAX_MS = 80;
-// Resize acknowledgement latency: smoothing weight for new samples, upper
-// bound for the request lead, and the guess for a window not yet measured.
-const LATENCY_WEIGHT = 0.4;
-const MAX_LEAD_MS = 120;
-const DEFAULT_LATENCY_MS = 16;
-// Size requests go out continuously so a client always renders the newest
-// target, but no more often than this, and at most MAX_PENDING are tracked.
-const MIN_REQUEST_GAP_US = 4000;
-const MAX_PENDING = 64;
 // Presses made while a window animates interrupt it; up to this many are
 // combined into the next placement.
 const MAX_QUEUED = 3;
@@ -100,22 +91,14 @@ export default class KeyboardMonitorSnap extends Extension {
         // Window -> {rect, hold}: the on-screen rectangle currently shown by
         // an actor transform, and the post-animation hold timeline.
         this._visuals = new Map();
-        // Window -> smoothed milliseconds from a size request until it is
-        // drawn, and between successive redraws (diagnostics only).
-        this._latency = new WeakMap();
-        // Window -> smoothed absolute deviation of latency samples.
-        this._latencySpread = new WeakMap();
-        this._redraw = new WeakMap();
         // Window -> learned delay (ms) of its follow-up frame after a resize,
         // and the recent samples it is computed from.
         this._followUp = new WeakMap();
         this._followSamples = new WeakMap();
-        // Follow-up observations still running after their morph ended, by
+        // Follow-up observations still running after their animation ended, by
         // stop function and by window (to end them before a maximize).
         this._learners = new Set();
         this._learnerByWindow = new WeakMap();
-        // Window -> monotonic time until which the image maps exactly.
-        this._exactUntil = new WeakMap();
         this._traceTimers = new Set();
         this._operations = new Map();
         this._enabled = true;
@@ -286,9 +269,7 @@ export default class KeyboardMonitorSnap extends Extension {
         Twm.clearTilingProps(window.get_id());
         window.isTiled = false;
         window.tiledRect = null;
-        const style = this._settings.get_string('animation-style');
-        const morph = style === 'morph' || style === 'reveal';
-        const effects = this._effects(window, {morph});
+        const effects = this._effects(window);
         // A cancelled placement drops its snapshots and skips at once,
         // including a maximize cover the placement is waiting on.
         operation.cancelEffects = () => effects.release();
@@ -296,12 +277,8 @@ export default class KeyboardMonitorSnap extends Extension {
             both: Meta.MaximizeFlags.BOTH,
             previousPlacement: operation.previousPlacement,
             // An interrupted animation continues from what is on screen.
-            animate: (from, to, apply) => {
-                const start = this._visuals.get(window)?.rect ?? this._displayedRect(window) ?? from;
-                return morph && effects.snapshot()
-                    ? this._morph(window, start, to, apply, operation, effects, {reveal: style === 'reveal'})
-                    : this._animate(window, start, to, apply, operation);
-            },
+            animate: (from, to, apply) => this._reveal(window,
+                this._visuals.get(window)?.rect ?? this._displayedRect(window) ?? from, to, apply, operation, effects),
             monitorExists: index => this._monitorExists(index),
             effects,
             waitFor: (predicate, stage) => this._waitForWindow(window, predicate, operation, stage),
@@ -337,189 +314,55 @@ export default class KeyboardMonitorSnap extends Extension {
         const st = St.Settings.get();
         if (!st.enable_animations)
             return 0;
-        return Math.round(this._settings.get_int('animation-duration') * st.slow_down_factor);
+        return Math.round(ANIMATION_MS * st.slow_down_factor);
     }
-    _maxStretch() {
-        return this._settings.get_int('max-stretch') / 100;
-    }
-    // Resize the real frame on every compositor frame so the application
-    // redraws continuously. A request is sent only when the client has
-    // acknowledged the previous size, or after a short timeout, so slow
-    // clients are not flooded; the final target is always sent afterwards.
-    _animate(window, from, to, apply, operation) {
-        const base = this._animationDuration();
-        const actor = window.get_compositor_private();
-        if (!base || !actor) {
-            this._clearVisual(window, false);
-            return Promise.resolve();
-        }
-        const duration = travelDuration(base, from, to);
-        const anchor = anchorFor(from, to);
-        const growth = growthFor(from, to);
-        const maxStretch = this._maxStretch();
-        this._trace(window, 'animate', {from, to, duration, lead:this._lead(window), maxStretch,
-            client: window.get_client_type?.() === Meta.WindowClientType.X11 ? 'x11' : 'wayland'});
-        // A previous hold or relax transition is superseded by this motion.
-        this._visuals.get(window)?.stopHold?.();
-        actor.remove_all_transitions();
-        actor.remove_clip?.();
-        // Exact mapping belongs to the cover this motion just faded out; a
-        // later motion must not inherit it.
-        const exactUntil = this._exactUntil.get(window) ?? 0;
-        this._exactUntil.delete(window);
-        // Same-size moves give no size commits to time.
-        const measurable = from.width !== to.width || from.height !== to.height;
-        return new Promise((resolve, reject) => {
-            // Linear timeline: the curve is evaluated directly so requests can
-            // sample it ahead of the frame being drawn.
-            const timeline = new Clutter.Timeline({actor, duration});
-            // Requests not yet seen drawn, oldest first; the newest request is
-            // also kept separately so a drawn one is never sent again.
-            const sent = [];
-            let lastRequest = null;
-            let lastDrawn = null;
-            // Curve time requested so far: never moves backwards, even when
-            // the latency estimate drops mid-motion.
-            let aimed = 0;
-            let finished = false;
-            const finish = error => {
-                if (finished) return;
-                finished = true;
-                operation.cancelAnimation = null;
-                timeline.disconnectObject(this);
-                actor.disconnectObject(timeline);
-                window.disconnectObject?.(timeline);
-                timeline.stop();
-                this._repaintCrossing(operation, true);
-                if (!error)
-                    this._hold(window, actor, to, {anchor, maxStretch, growth});
-                else if (!operation.superseded)
-                    this._clearVisual(window, false, actor);
-                // A superseded motion keeps its transform: the next placement
-                // starts from this on-screen rectangle without a jump.
-                error ? reject(error) : resolve();
-            };
-            operation.cancelAnimation = () => finish(new Error('Placement cancelled'));
-            timeline.connectObject('new-frame', () => {
-                this._repaintCrossing(operation);
-                const elapsed = timeline.get_elapsed_time();
-                // What is on screen, not Mutter's frame rect: that can change
-                // as soon as a size is requested, long before the client draws it.
-                const frame = this._drawnFrame(window, actor).frame;
-                const now = GLib.get_monotonic_time();
-                // Only a newly drawn size is a commit: the newest request it
-                // matches gives one latency sample (older ones were skipped by
-                // the client), and the time since the last commit one redraw.
-                if (!lastDrawn || lastDrawn.width !== frame.width || lastDrawn.height !== frame.height) {
-                    if (lastDrawn && measurable)
-                        this._sample(this._redraw, window, (now-lastDrawn.at)/1000);
-                    lastDrawn = {width: frame.width, height: frame.height, at: now};
-                    // Exact sizes first: late in a motion successive requests
-                    // differ by under 3 px, and a loose match would pair the
-                    // drawn size with a newer request and under-read the lag.
-                    // The tolerance covers clients that adjust sizes slightly.
-                    const newest = tolerance => {
-                        for (let i = sent.length-1; i >= 0; i--) {
-                            if (Math.abs(frame.width-sent[i].rect.width) <= tolerance &&
-                                Math.abs(frame.height-sent[i].rect.height) <= tolerance)
-                                return i;
-                        }
-                        return -1;
-                    };
-                    let acked = newest(0);
-                    if (acked === -1)
-                        acked = newest(3);
-                    if (acked !== -1) {
-                        if (measurable)
-                            this._sampleLatency(window, (now-sent[acked].at)/1000);
-                        sent.splice(0, acked+1);
-                    }
-                }
-                // Ask for the size the curve will reach when the client is
-                // expected to draw it.
-                aimed = Math.max(aimed, elapsed + this._lead(window));
-                const ahead = interpolateRect(from, to, easeOutCubic(aimed/duration));
-                if ((!lastRequest || now-lastRequest.at >= MIN_REQUEST_GAP_US) &&
-                    !(lastRequest && sameFrame(ahead, lastRequest.rect, 0))) {
-                    lastRequest = {rect: ahead, at: now};
-                    sent.push(lastRequest);
-                    if (sent.length > MAX_PENDING)
-                        sent.shift();
-                    apply(ahead);
-                }
-                const curve = interpolateRect(from, to, easeOutCubic(elapsed/duration));
-                // While a cover fades, the restored floating frame underneath
-                // is mapped exactly onto the curve; the cap applies afterwards.
-                const exact = now < exactUntil;
-                this._showAt(window, actor, curve, exact
-                    ? {anchor, maxStretch: null, growth: {x: 0, y: 0}} : {anchor, maxStretch, growth});
-                if (this._settings.get_boolean('debug-logging'))
-                    console.log(`${this.uuid}: FRAME ${JSON.stringify({id:window.get_id(), elapsed,
-                        curve, drawn:frame, mutter:rect(window.get_frame_rect()), requested:lastRequest?.rect ?? null,
-                        lead:Math.round(this._lead(window)*10)/10, pending:sent.length,
-                        latency:Math.round((this._latency.get(window) ?? 0)*10)/10,
-                        spread:Math.round((this._latencySpread.get(window) ?? 0)*10)/10,
-                        redraw:Math.round((this._redraw.get(window) ?? 0)*10)/10,
-                        scale:[actor.scale_x, actor.scale_y].map(v => Math.round(v*1000)/1000)})}`);
-            }, 'completed', () => finish(), this);
-            actor.connectObject('destroy', () => operation.cancel(), timeline);
-            // A closing window keeps its actor for GNOME's close effect; stop
-            // driving it as soon as it is unmanaged.
-            window.connectObject?.('unmanaging', () => operation.cancel(), timeline);
-            timeline.start();
-        });
-    }
-    // Snapshot morph: the snapshot taken when the placement began moves along
-    // the curve on every display frame, while the app renders its final size
-    // once. When that size is drawn, the live window, mapped onto the curve,
-    // fades in as the snapshot fades out. App speed only decides when the
-    // fade starts, never how smoothly the window moves.
-    // Reveal style (reveal: true): content is never scaled down; everything
-    // is cropped to the moving outline and aligned on its fixed edge.
-    // Shrinking: the snapshot sits under the live window, and after the
-    // handover the live window fades in on top at its true size; the
-    // snapshot shows in the strip it does not cover. Growing: the motion
-    // starts gently (ease-in-out), the live window is shown underneath at its
-    // true size from the start, and the snapshot stays on top at its own size
-    // (stretched only to fill the outline until the app has drawn anything
-    // bigger), fading out at the handover.
-    _morph(window, from, to, apply, operation, effects, {reveal = false} = {}) {
+    // The animation. The window's outline moves along an eased curve on every
+    // display frame while the app is asked once for its final size. Content
+    // is never scaled down; everything is cropped to the moving outline and
+    // attached to its fixed edge (top-left when both edges move).
+    // Shrinking: the snapshot taken when the placement began sits under the
+    // live window; at the handover the live window fades in on top at its
+    // true size, and the snapshot shows in the strip it does not cover.
+    // Growing: the motion starts gently; the live window is shown underneath
+    // at its true size from the start, the snapshot stays on top at its own
+    // size and fades out at the handover, and a backdrop (the snapshot
+    // stretched) fills any corner neither reaches. The handover waits for the
+    // app's final layout (see QUIET_MS and FOLLOW_*). Without animations or
+    // a snapshot the window is simply placed.
+    _reveal(window, from, to, apply, operation, effects) {
         const base = this._animationDuration();
         const actor = window.get_compositor_private();
         const cover = effects.snapshot();
         if (!base || !actor || !cover)
-            return this._animate(window, from, to, apply, operation);
+            return Promise.resolve();
         const duration = travelDuration(base, from, to);
-        const exact = {anchor: anchorFor(from, to), maxStretch: null, growth: {x: 0, y: 0}};
-        this._trace(window, 'animate', {from, to, duration, style: reveal ? 'reveal' : 'morph',
+        // Attach content to the edge that stays put, or to the top-left
+        // (where apps lay out) when both edges move.
+        const fixed = anchorFor(from, to);
+        const anchor = {x: fixed.x === 0.5 ? 0 : fixed.x, y: fixed.y === 0.5 ? 0 : fixed.y};
+        this._trace(window, 'animate', {from, to, duration,
             followUp: Math.round(this._followUp.get(window) ?? 0),
             client: window.get_client_type?.() === Meta.WindowClientType.X11 ? 'x11' : 'wayland'});
         this._visuals.get(window)?.stopHold?.();
         actor.remove_all_transitions();
         actor.remove_clip?.();
-        this._exactUntil.delete(window);
         const startSize = this._drawnFrame(window, actor).frame;
         // The snapshot's own size, before any scaling.
         const natural = {width: cover.width, height: cover.height};
-        const growX = reveal && to.width > from.width+3;
-        const growY = reveal && to.height > from.height+3;
+        const growX = to.width > from.width+3;
+        const growY = to.height > from.height+3;
         const growing = growX || growY;
-        // Reveal eases each direction on its own: a growing direction starts
-        // gently (little to fill before the app has drawn), a shrinking one
-        // settles quickly (so a mixed move's uncovered strip goes fast).
+        // Each direction eases on its own: a growing one starts gently
+        // (little to fill before the app has drawn), a shrinking one settles
+        // quickly (so a mixed move's uncovered strip goes fast).
         const easeX = growX ? easeInOutCubic : easeOutCubic;
         const easeY = growY ? easeInOutCubic : easeOutCubic;
-        // Reveal attaches content to the edge that stays put, or to the
-        // top-left (where apps lay out) when both edges move, so it travels
-        // with the window instead of sliding within it.
-        const anchor = reveal ? {x: exact.anchor.x === 0.5 ? 0 : exact.anchor.x,
-            y: exact.anchor.y === 0.5 ? 0 : exact.anchor.y} : exact.anchor;
         let backdrop = null;
         if (growing) {
             global.window_group.set_child_above_sibling(cover, actor);
             backdrop = effects.backdrop();
             actor.opacity = 255;
-        } else if (reveal) {
+        } else {
             global.window_group.set_child_below_sibling(cover, actor);
         }
         // One request for the final size; nothing in between.
@@ -544,11 +387,9 @@ export default class KeyboardMonitorSnap extends Extension {
                 const [y, height] = along('y', 'height', easeY(t));
                 return {x, y, width, height};
             };
-            // Elapsed time when the live window began to fade in, and how long
-            // that fade lasts (read once per snap; live-tunable).
-            const fadeLimit = this._settings.get_int('morph-fade');
+            // Elapsed time when the handover began, and how long its fade lasts.
             let fadeFrom = null;
-            let fadeMs = fadeLimit;
+            let fadeMs = FADE_MS;
             // When the app last drew anything (the snapshot counts as drawn),
             // when it first drew the final size, and every draw since.
             let lastDamage = GLib.get_monotonic_time();
@@ -556,9 +397,9 @@ export default class KeyboardMonitorSnap extends Extension {
             const draws = [];
             // Learned follow-up delay for this window (see MORPH_FOLLOW_*).
             const followUp = this._followUp.get(window) ?? 0;
-            const follows = followUp >= MORPH_FOLLOW_MIN_MS;
-            const followWait = Math.min(followUp, MORPH_FOLLOW_CAP_MS);
-            const readyLimit = follows ? MORPH_FOLLOW_READY_LIMIT : MORPH_READY_LIMIT;
+            const follows = followUp >= FOLLOW_MIN_MS;
+            const followWait = Math.min(followUp, FOLLOW_CAP_MS);
+            const readyLimit = follows ? FOLLOW_READY_LIMIT : READY_LIMIT;
             let finished = false;
             const sameSize = (a, b) => Math.abs(a.width-b.width) <= 3 && Math.abs(a.height-b.height) <= 3;
             // Mutter's frame, once the app has acknowledged the request, is
@@ -577,10 +418,10 @@ export default class KeyboardMonitorSnap extends Extension {
             const reaim = (elapsed, target, why) => {
                 const current = endAt(elapsed);
                 glide = {from: current, at: elapsed,
-                    ms: Math.max(1, Math.min(MORPH_REAIM_MS, duration-elapsed))};
+                    ms: Math.max(1, Math.min(REAIM_MS, duration-elapsed))};
                 end = target;
                 sizedAt = null;
-                this._trace(window, 'morph-reaim', {why, elapsed, from:current, to:target});
+                this._trace(window, 'reaim', {why, elapsed, from:current, to:target});
             };
             const finish = error => {
                 if (finished) return;
@@ -594,17 +435,17 @@ export default class KeyboardMonitorSnap extends Extension {
                 this._repaintCrossing(operation, true);
                 this._observeFollowUp(window, actor, sizedAt, draws, from, to);
                 if (!error) {
-                    // The live window takes over; an unfinished fade completes
-                    // on its own while the hold keeps the window on target.
-                    // In reveal style the snapshot is underneath and now fully
-                    // hidden by the opaque window at its final size.
+                    // The live window takes over at its final size; a growing
+                    // move's unfinished fade completes on its own (a shrinking
+                    // move's snapshot is underneath and now fully hidden),
+                    // while the hold keeps the window on target.
                     actor.opacity = 255;
                     actor.remove_clip?.();
-                    this._showAt(window, actor, end, exact);
+                    this._showAt(window, actor, end, anchor);
                     effects.dropBackdrop();
-                    effects.dropCover(reveal && !growing ? 0 : fadeFrom === null ? Math.min(fadeLimit, MORPH_MIN_FADE_MS)
+                    effects.dropCover(!growing ? 0 : fadeFrom === null ? MIN_FADE_MS
                         : Math.max(0, fadeMs-(elapsed-fadeFrom)));
-                    this._hold(window, actor, end, exact);
+                    this._hold(window, actor, end, anchor);
                 } else if (!operation.superseded) {
                     this._clearVisual(window, false, actor);
                 }
@@ -642,46 +483,35 @@ export default class KeyboardMonitorSnap extends Extension {
                     fit(cover, natural.width, natural.height);
                     if (backdrop)
                         fit(backdrop, Math.max(natural.width, curve.width), Math.max(natural.height, curve.height));
-                } else if (reveal) {
+                } else {
                     // Shrinking: the snapshot is at least the outline's size.
                     fit(cover, Math.max(natural.width, curve.width), Math.max(natural.height, curve.height));
-                } else {
-                    cover.set_position(curve.x, curve.y);
-                    cover.set_size(curve.width, curve.height);
                 }
                 const sized = sameSize(drawn, end);
                 if (sized && sizedAt === null)
                     sizedAt = lastDamage;
                 // Hand over once the content is final: after the learned
                 // follow-up frame for windows that draw one, otherwise after
-                // MORPH_QUIET_MS without drawing.
+                // QUIET_MS without drawing.
                 const ready = sized && (follows
-                    ? now-sizedAt >= (followWait+MORPH_FOLLOW_QUIET_MS)*1000 &&
-                      now-lastDamage >= MORPH_FOLLOW_QUIET_MS*1000
-                    : now-lastDamage >= MORPH_QUIET_MS*1000);
+                    ? now-sizedAt >= (followWait+FOLLOW_QUIET_MS)*1000 &&
+                      now-lastDamage >= FOLLOW_QUIET_MS*1000
+                    : now-lastDamage >= QUIET_MS*1000);
                 if (fadeFrom === null && (ready || late)) {
                     fadeFrom = elapsed;
-                    fadeMs = Math.max(Math.min(fadeLimit, MORPH_MIN_FADE_MS),
-                        Math.min(fadeLimit, MORPH_FADE_END*duration-elapsed));
+                    fadeMs = Math.max(MIN_FADE_MS, Math.min(FADE_MS, FADE_END*duration-elapsed));
                 }
                 if (growing) {
                     // Live window underneath at its true size throughout;
                     // the snapshot on top fades out from the handover.
                     this._showRevealed(window, actor, curve, anchor);
                     if (fadeFrom !== null)
-                        cover.opacity = fadeMs <= 0 ? 0
-                            : Math.round(255*(1-Math.min(1, (elapsed-fadeFrom)/fadeMs)));
-                } else if (fadeFrom !== null && reveal) {
+                        cover.opacity = Math.round(255*(1-Math.min(1, (elapsed-fadeFrom)/fadeMs)));
+                } else if (fadeFrom !== null) {
                     // The live window fades in on top, unscaled and cropped;
                     // the snapshot underneath stays until the motion ends.
-                    const f = fadeMs <= 0 ? 1 : Math.min(1, (elapsed-fadeFrom)/fadeMs);
-                    actor.opacity = Math.round(255*f);
+                    actor.opacity = Math.round(255*Math.min(1, (elapsed-fadeFrom)/fadeMs));
                     this._showRevealed(window, actor, curve, anchor);
-                } else if (fadeFrom !== null) {
-                    actor.opacity = 255;
-                    this._showAt(window, actor, curve, exact);
-                    cover.opacity = fadeMs <= 0 ? 0
-                        : Math.round(255*(1-Math.min(1, (elapsed-fadeFrom)/fadeMs)));
                 } else {
                     // Still covered: remember what is on screen for interruptions.
                     const visual = this._visuals.get(window) ?? {};
@@ -689,7 +519,7 @@ export default class KeyboardMonitorSnap extends Extension {
                     this._visuals.set(window, visual);
                 }
                 if (this._settings.get_boolean('debug-logging'))
-                    console.log(`${this.uuid}: FRAME ${JSON.stringify({id:window.get_id(), style:reveal ? 'reveal' : 'morph', elapsed,
+                    console.log(`${this.uuid}: FRAME ${JSON.stringify({id:window.get_id(), elapsed,
                         curve, end, drawn, mutter:rect(window.get_frame_rect()), sized, ready, fadeFrom,
                         sinceDamage:Math.round((now-lastDamage)/1000), cover:cover.opacity, fadeMs, followUp,
                         sinceSized:sizedAt === null ? null : Math.round((now-sizedAt)/1000), growing, anchor,
@@ -705,8 +535,8 @@ export default class KeyboardMonitorSnap extends Extension {
             timeline.start();
         });
     }
-    // Finish observing the follow-up window after the morph has ended: keep
-    // recording draws until MORPH_FOLLOW_WINDOW_MS after the first frame at
+    // Finish observing the follow-up window after the animation has ended: keep
+    // recording draws until FOLLOW_WINDOW_MS after the first frame at
     // the final size, then learn. Stops quietly if the window closes.
     // A maximize ends the observation early: the app's redraw for the new
     // state is not a layout follow-up. Then only a follow-up already seen
@@ -714,7 +544,7 @@ export default class KeyboardMonitorSnap extends Extension {
     _observeFollowUp(window, actor, sizedAt, draws, from, to) {
         if (sizedAt === null || (from.width === to.width && from.height === to.height))
             return;
-        const remaining = Math.ceil((sizedAt + MORPH_FOLLOW_WINDOW_MS*1000 - GLib.get_monotonic_time())/1000);
+        const remaining = Math.ceil((sizedAt + FOLLOW_WINDOW_MS*1000 - GLib.get_monotonic_time())/1000);
         if (remaining <= 0) {
             this._learnFollowUp(window, sizedAt, draws, from, to, true);
             return;
@@ -746,9 +576,9 @@ export default class KeyboardMonitorSnap extends Extension {
         }, this);
         timeline.start();
     }
-    // After a morph: how long after its first frame at the final size did the
+    // After an animation: how long after its first frame at the final size did the
     // app keep drawing? Draws within 3 ms form one burst; the latest burst
-    // starting within MORPH_FOLLOW_WINDOW_MS is the follow-up. No sample is
+    // starting within FOLLOW_WINDOW_MS is the follow-up. No sample is
     // taken for same-size moves, or when the window ended before a missing
     // follow-up could be ruled out. The estimate is a percentile of recent
     // samples: one slow or missing follow-up barely moves it.
@@ -764,7 +594,7 @@ export default class KeyboardMonitorSnap extends Extension {
                 burst = {start: at};
             burst.last = at;
             const delay = (burst.start-sizedAt)/1000;
-            if (delay <= MORPH_FOLLOW_WINDOW_MS)
+            if (delay <= FOLLOW_WINDOW_MS)
                 follow = delay;
         }
         if (follow === null && !complete)
@@ -772,12 +602,12 @@ export default class KeyboardMonitorSnap extends Extension {
         follow ??= 0;
         const samples = this._followSamples.get(window) ?? [];
         samples.push(follow);
-        if (samples.length > MORPH_FOLLOW_SAMPLES)
+        if (samples.length > FOLLOW_SAMPLES)
             samples.shift();
         this._followSamples.set(window, samples);
         const sorted = [...samples].sort((a, b) => a-b);
         this._followUp.set(window, sorted[Math.min(sorted.length-1,
-            Math.floor(MORPH_FOLLOW_PERCENTILE*sorted.length))]);
+            Math.floor(FOLLOW_PERCENTILE*sorted.length))]);
         this._trace(window, 'follow-up', {sample: Math.round(follow), learned: Math.round(this._followUp.get(window))});
     }
     // Repaint the whole window layer (it includes the backgrounds, so it spans
@@ -826,27 +656,6 @@ export default class KeyboardMonitorSnap extends Extension {
             height: Math.round(frame.height*actor.scale_y),
         };
     }
-    _sample(map, window, ms) {
-        const previous = map.get(window);
-        map.set(window, previous === undefined ? ms : previous + LATENCY_WEIGHT*(ms-previous));
-    }
-    _sampleLatency(window, ms) {
-        const mean = this._latency.get(window);
-        if (mean !== undefined)
-            this._sample(this._latencySpread, window, Math.abs(ms-mean));
-        this._sample(this._latency, window, ms);
-    }
-    // Aim requests at the fast end of the client's measured lag (mean minus
-    // twice its typical deviation), so drawn content almost never arrives
-    // ahead of the curve and the image stretches continuously, one way.
-    // Content ahead is shown unstretched (one-sided rule), which stalls the
-    // visible edge: aiming at the mean (version 14) did that on ~10% of
-    // frames; aiming further (version 12) also flipped the stretch.
-    _lead(window) {
-        const mean = this._latency.get(window) ?? DEFAULT_LATENCY_MS;
-        const spread = this._latencySpread.get(window) ?? 0;
-        return Math.min(MAX_LEAD_MS, Math.max(0, mean - 2*spread));
-    }
     // Show the live window unscaled, its drawn frame aligned to `rect` at the
     // anchor (the edge that does not move), cropped to `rect`.
     _showRevealed(window, actor, rect, anchor) {
@@ -865,11 +674,12 @@ export default class KeyboardMonitorSnap extends Extension {
         visual.rect = {...rect};
         this._visuals.set(window, visual);
     }
-    // Draw the window actor so its current real frame appears at `rect`,
-    // within the stretch cap. Remembers what was actually drawn.
-    _showAt(window, actor, rect, shape = {}) {
+    // Draw the window actor so its current real frame appears exactly at
+    // `rect` (scaled if the app has not reached it yet; used by the hold).
+    // Remembers what was drawn.
+    _showAt(window, actor, rect, anchor) {
         const drawn = this._drawnFrame(window, actor);
-        const t = visualTransform(drawn.frame, drawn.buffer, rect, shape);
+        const t = visualTransform(drawn.frame, drawn.buffer, rect, anchor);
         actor.set_pivot_point(0, 0);
         actor.scale_x = t.scale_x;
         actor.scale_y = t.scale_y;
@@ -882,7 +692,7 @@ export default class KeyboardMonitorSnap extends Extension {
     }
     // Keep a lagging client visually on target until its frame catches up,
     // or VISUAL_HOLD_MS passes (minimum-size apps never reach it), then relax.
-    _hold(window, actor, target, shape) {
+    _hold(window, actor, target, anchor) {
         const visual = this._visuals.get(window);
         if (!visual)
             return;
@@ -912,7 +722,7 @@ export default class KeyboardMonitorSnap extends Extension {
             if (sameFrame(this._drawnFrame(window, actor).frame, target, 1))
                 end(true);
             else
-                this._showAt(window, actor, target, shape);
+                this._showAt(window, actor, target, anchor);
         }, 'completed', () => end(false), this);
         actor.connectObject('destroy', gone, hold);
         window.connectObject?.('unmanaging', gone, hold);
@@ -940,7 +750,7 @@ export default class KeyboardMonitorSnap extends Extension {
     // Native maximize/unmaximize transitions are replaced: GNOME's zoom
     // effect is skipped, and a snapshot covers the frame jump while Mutter
     // leaves the maximized state, then fades out as the animation begins.
-    _effects(window, {morph = false} = {}) {
+    _effects(window) {
         const actor = window.get_compositor_private();
         let cover = null;
         let backdrop = null;
@@ -1018,15 +828,14 @@ export default class KeyboardMonitorSnap extends Extension {
                 global.window_group.set_child_above_sibling(cover, actor);
                 actor.opacity = 0;
                 hidden = true;
-                // If this placement is interrupted before it animates, the
-                // next one starts from where the window was seen.
+                // The animation (or, if this placement is interrupted before
+                // it animates, the next one) starts where the snapshot is.
                 const visual = this._visuals.get(window) ?? {};
-                visual.rect ??= {...rect};
+                visual.rect ??= {...at};
                 this._visuals.set(window, visual);
             },
-            // In morph mode the snapshot is the animation's starting image;
-            // the morph fades it out itself.
-            coversAll: morph,
+            // The snapshot is the animation's starting image; the animation
+            // moves, crops and fades it.
             snapshot: () => cover,
             // A second layer with the snapshot's image, under the window,
             // stretched to fill the outline wherever no crisp image reaches.
@@ -1067,7 +876,7 @@ export default class KeyboardMonitorSnap extends Extension {
                     started: GLib.get_monotonic_time(), expired: false, waiting: null};
                 stateWatch = watch;
                 const settled = () => watch.damages > 0 &&
-                    GLib.get_monotonic_time()-watch.lastDamage >= MORPH_QUIET_MS*1000;
+                    GLib.get_monotonic_time()-watch.lastDamage >= QUIET_MS*1000;
                 watch.finish = done => {
                     if (stateWatch !== watch) return;
                     this._trace(window, 'state-cover', {settled: done, damages: watch.damages,
@@ -1096,7 +905,7 @@ export default class KeyboardMonitorSnap extends Extension {
                 timeline.start();
             },
             // Resolves once the app has drawn after the state change and then
-            // nothing new for MORPH_QUIET_MS, or once STATE_COVER_MAX_MS has
+            // nothing new for QUIET_MS, or once STATE_COVER_MAX_MS has
             // passed, or when the placement ends some other way.
             uncoverState: () => new Promise(resolve => {
                 const watch = stateWatch;
@@ -1107,7 +916,7 @@ export default class KeyboardMonitorSnap extends Extension {
                 watch.waiting = resolve;
                 if (watch.expired)
                     watch.finish(false);
-                else if (watch.damages > 0 && GLib.get_monotonic_time()-watch.lastDamage >= MORPH_QUIET_MS*1000)
+                else if (watch.damages > 0 && GLib.get_monotonic_time()-watch.lastDamage >= QUIET_MS*1000)
                     watch.finish(true);
             }),
             dropCover: ms => {
@@ -1121,17 +930,6 @@ export default class KeyboardMonitorSnap extends Extension {
                     return;
                 }
                 fading.ease({opacity: 0, duration: ms, mode: Clutter.AnimationMode.EASE_OUT_QUAD,
-                    onStopped: () => fading.destroy()});
-            },
-            uncover: () => {
-                if (!cover || morph) return;
-                const fading = cover;
-                cover = null;
-                actor.opacity = 255;
-                hidden = false;
-                this._exactUntil.set(window, GLib.get_monotonic_time() + COVER_FADE_MS*1000);
-                fading.ease({opacity: 0, duration: COVER_FADE_MS,
-                    mode: Clutter.AnimationMode.EASE_OUT_QUAD,
                     onStopped: () => fading.destroy()});
             },
             release: () => {

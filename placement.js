@@ -37,37 +37,21 @@ export function anchorFor(from, to) {
     };
     return {x: axis('x', 'width'), y: axis('y', 'height')};
 }
-export function growthFor(from, to) {
-    return {x: Math.sign(to.width-from.width), y: Math.sign(to.height-from.height)};
-}
 // Actor transform that shows a window whose real frame is `frame` (inside
-// its buffer rect, where the actor sits) at the on-screen rectangle
-// `visual`. Scaling pivots at the actor origin, as in GNOME's own effects.
-// maxStretch limits scaling to 1 +/- maxStretch (0 = move only; null =
-// unlimited); the anchor point then lands exactly on the visual's.
-// growth (+1 growing, -1 shrinking, 0 unchanged, per axis) makes scaling
-// one-sided: content that lags is stretched toward the curve, but content
-// that is ahead is shown at its real size, never squashed back. The image
-// therefore never flips between stretched and squashed during a motion.
-// Returns the transform and the rectangle actually drawn.
-export function visualTransform(frame, buffer, visual, {maxStretch = null, anchor = {x:0, y:0},
-    growth = {x:0, y:0}} = {}) {
-    const axis = (start, size, a, grow) => {
-        let scale = frame[size] > 0 ? visual[size] / frame[size] : 1;
-        if (maxStretch !== null)
-            scale = Math.min(1+maxStretch, Math.max(1-maxStretch, scale));
-        if (grow > 0)
-            scale = Math.max(1, scale);
-        else if (grow < 0)
-            scale = Math.min(1, scale);
+// its buffer rect, where the actor sits) exactly at the on-screen rectangle
+// `visual`, with the anchor point (0 start edge, 1 end edge, 0.5 centre)
+// fixed. Scaling pivots at the actor origin, as in GNOME's own effects.
+// Returns the transform and the rectangle drawn.
+export function visualTransform(frame, buffer, visual, anchor = {x:0, y:0}) {
+    const axis = (start, size, a) => {
+        const scale = frame[size] > 0 ? visual[size] / frame[size] : 1;
         const target = visual[start] + a*visual[size];
         const local = frame[start] - buffer[start] + a*frame[size];
-        const translation = target - buffer[start] - local*scale;
         const drawnSize = frame[size]*scale;
-        return {scale, translation, drawn: target - a*drawnSize, drawnSize};
+        return {scale, translation: target - buffer[start] - local*scale, drawn: target - a*drawnSize, drawnSize};
     };
-    const x = axis('x', 'width', anchor.x, growth.x);
-    const y = axis('y', 'height', anchor.y, growth.y);
+    const x = axis('x', 'width', anchor.x);
+    const y = axis('y', 'height', anchor.y);
     return {
         scale_x: x.scale, scale_y: y.scale, translation_x: x.translation, translation_y: y.translation,
         drawn: {x: x.drawn, y: y.drawn, width: x.drawnSize, height: y.drawnSize},
@@ -104,10 +88,9 @@ async function placeStages(window, target, monitor, full, {waitFor, both, constr
     // Where the window visibly is now; the animation starts here even if
     // unmaximizing restores an older floating frame underneath the cover.
     const start = frameCopy(window.get_frame_rect());
-    // Morph animations snapshot every window; otherwise only a window leaving
-    // the maximized state needs a cover for its frame jump.
-    if (effects?.coversAll || window.fullscreen || window.maximizedHorizontally || window.maximizedVertically)
-        effects?.cover(start);
+    // The snapshot is the animation's starting image; it also covers the
+    // frame jump while a window leaves the maximized state.
+    effects?.cover(start);
     // Each native state change gets its own effect skip, armed only around
     // the call and its wait, so close/minimize effects are not swallowed.
     if (window.fullscreen) {
@@ -143,7 +126,6 @@ async function placeStages(window, target, monitor, full, {waitFor, both, constr
         target.height === previousPlacement.target.height;
     const appliedTarget = knownSize
         ? {...target, width:before.width, height:before.height} : target;
-    effects?.uncover();
     if (animate && !sameFrame(start, appliedTarget, 0)) {
         await animate(start, appliedTarget, rect =>
             window.move_resize_frame(true, rect.x, rect.y, rect.width, rect.height));
