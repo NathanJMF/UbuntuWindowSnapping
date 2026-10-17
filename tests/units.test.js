@@ -4,6 +4,7 @@ import {Handover, QUIET_MS, FOLLOW_CAP_MS, FOLLOW_QUIET_MS, FADE_MS, MIN_FADE_MS
 import {followUpDelay, learnFollowUp, FOLLOW_SAMPLES} from '../follow-up.js';
 import {contentAnchor, snapshotLayout, revealedWindowLayout} from '../layers.js';
 import {EasedPath, sameSize} from '../geometry.js';
+import {Scope, Snap} from '../scope.js';
 
 let count = 0;
 function assert(value, message) {
@@ -131,6 +132,43 @@ function startOf(handover, {sizedAt = null, drawsAt = []} = {}) {
     const after = path.at(40);
     assert(before.x === after.x && before.width === after.width, 're-aim keeps the current position');
     assert(path.at(100).width === 700, 'and arrives at the new target');
+}
+
+// --- Lifetimes
+{
+    const order = [];
+    const scope = new Scope();
+    scope.add(() => order.push('first'));
+    scope.add(() => order.push('second'));
+    const timeline = {stopped: 0, stop() {this.stopped++;}, connectObject(...args) {this.tracker = args.at(-1);},
+        disconnectObject(tracker) {if (tracker === this.tracker) this.tracker = null;}};
+    scope.timeline(timeline, 'new-frame', () => {});
+    scope.dispose();
+    scope.dispose();
+    assert(order.join() === 'second,first', 'released newest first');
+    assert(timeline.stopped === 1 && timeline.tracker === null, 'timeline stopped and disconnected, once');
+    let late = false;
+    scope.add(() => {late = true;});
+    assert(late, 'registering on a disposed scope releases at once');
+}
+{
+    const order = [];
+    const snap = new Snap({});
+    snap.onCancel(() => order.push('effects'));
+    const unregister = snap.onCancel(() => order.push('wait'));
+    snap.onCancel(() => order.push('animation'));
+    unregister();
+    snap.supersede();
+    snap.cancel();
+    assert(snap.cancelled && snap.superseded, 'superseding cancels');
+    assert(order.join() === 'animation,effects', 'hooks run once, newest first, unregistered ones skipped');
+    let immediate = false;
+    snap.onCancel(() => {immediate = true;});
+    assert(immediate, 'a hook registered after cancelling runs at once');
+    const cancelled = new Snap({});
+    cancelled.cancel();
+    cancelled.supersede();
+    assert(!cancelled.superseded, 'an already cancelled snap is not marked superseded');
 }
 
 print(`PASS: ${count} unit assertions`);

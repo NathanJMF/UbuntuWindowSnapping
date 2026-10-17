@@ -16,6 +16,7 @@ import {sameFrame, sameSize, rect, travelDuration, visualTransform, EasedPath} f
 import {Handover, QUIET_MS} from './handover.js';
 import {FOLLOW_WINDOW_MS, followUpDelay, learnFollowUp} from './follow-up.js';
 import {contentAnchor, snapshotLayout, revealedWindowLayout} from './layers.js';
+import {Scope, Snap} from './scope.js';
 
 const UUID = 'tiling-assistant@ubuntu.com';
 // Apply a snapshotLayout() to a snapshot widget.
@@ -202,14 +203,15 @@ export default class KeyboardMonitorSnap extends Extension {
             let finished = false;
             let stable = 0;
             const start = GLib.get_monotonic_time();
+            let unregister = () => {};
             const finish = error => {
                 if (finished) return;
                 finished = true;
                 if (source !== null) GLib.Source.remove(source);
-                operation.cancelWait = null;
+                unregister();
                 error ? reject(error) : resolve();
             };
-            operation.cancelWait = () => finish(new Error('Placement cancelled'));
+            unregister = operation.onCancel(() => finish(new Error('Placement cancelled')));
             const check = () => {
                 try {
                     if (operation.cancelled || !this._enabled || !this._dependencyReady() ||
@@ -249,7 +251,7 @@ export default class KeyboardMonitorSnap extends Extension {
         const effects = this._effects(window);
         // A cancelled placement drops its snapshots and skips at once,
         // including a maximize cover the placement is waiting on.
-        operation.cancelEffects = () => effects.release();
+        operation.onCancel(() => effects.release());
         const applied = await placeWindow(window, target, monitor, {
             both: Meta.MaximizeFlags.BOTH,
             previousPlacement: operation.previousPlacement,
@@ -320,7 +322,7 @@ export default class KeyboardMonitorSnap extends Extension {
             client: window.get_client_type?.() === Meta.WindowClientType.X11 ? 'x11' : 'wayland'});
         this._visuals.get(window)?.stopHold?.();
         actor.remove_all_transitions();
-        actor.remove_clip?.();
+        actor.remove_clip();
         const startSize = this._drawnFrame(window, actor).frame;
         // The snapshot's own size, before any scaling.
         const natural = {width: cover.width, height: cover.height};
@@ -335,7 +337,8 @@ export default class KeyboardMonitorSnap extends Extension {
         // One request for the final size; nothing in between.
         apply(to);
         return new Promise((resolve, reject) => {
-            const timeline = new Clutter.Timeline({actor, duration: path.duration});
+            const scope = new Scope();
+            const timeline = scope.timeline(new Clutter.Timeline({actor, duration: path.duration}));
             const handover = new Handover(path.duration, followUp);
             // When the app last drew anything (the snapshot counts as drawn),
             // and every draw since the animation began.
@@ -355,15 +358,13 @@ export default class KeyboardMonitorSnap extends Extension {
                 return g.width >= to.width-3 && g.height >= to.height-3 &&
                     aligned('x', 'width') && aligned('y', 'height') ? g : null;
             };
+            let unregister = () => {};
             const finish = error => {
                 if (finished) return;
                 finished = true;
-                operation.cancelAnimation = null;
-                timeline.disconnectObject(this);
-                actor.disconnectObject(timeline);
-                window.disconnectObject?.(timeline);
+                unregister();
                 const elapsed = timeline.get_elapsed_time();
-                timeline.stop();
+                scope.dispose();
                 this._repaintCrossing(operation, true);
                 this._observeFollowUp(window, actor, handover.sizedAt, draws, from, to);
                 if (!error) {
@@ -372,7 +373,7 @@ export default class KeyboardMonitorSnap extends Extension {
                     // move's snapshot is underneath and now fully hidden),
                     // while the hold keeps the window on target.
                     actor.opacity = 255;
-                    actor.remove_clip?.();
+                    actor.remove_clip();
                     this._showAt(window, actor, path.end, anchor);
                     effects.dropBackdrop();
                     effects.dropCover(growing ? handover.remaining(elapsed) : 0);
@@ -382,8 +383,8 @@ export default class KeyboardMonitorSnap extends Extension {
                 }
                 error ? reject(error) : resolve();
             };
-            operation.cancelAnimation = () => finish(new Error('Placement cancelled'));
-            timeline.connectObject('new-frame', () => {
+            unregister = operation.onCancel(() => finish(new Error('Placement cancelled')));
+            scope.connect(timeline, 'new-frame', () => {
                 const now = GLib.get_monotonic_time();
                 this._repaintCrossing(operation);
                 const elapsed = timeline.get_elapsed_time();
@@ -434,14 +435,14 @@ export default class KeyboardMonitorSnap extends Extension {
                         followUp, sinceSized: handover.sizedAt === null ? null : Math.round((now-handover.sizedAt)/1000),
                         growing, anchor, cost: GLib.get_monotonic_time()-now,
                         scale: [actor.scale_x, actor.scale_y].map(v => Math.round(v*1000)/1000)})}`);
-            }, 'completed', () => finish(), this);
-            actor.connectObject('destroy', () => operation.cancel(),
+            }, 'completed', () => finish());
+            scope.connect(actor, 'destroy', () => operation.cancel(),
                 'damaged', () => {
                     lastDamage = GLib.get_monotonic_time();
                     if (draws.length < 64)
                         draws.push(lastDamage);
-                }, timeline);
-            window.connectObject?.('unmanaging', () => operation.cancel(), timeline);
+                });
+            scope.connect(window, 'unmanaging', () => operation.cancel());
             timeline.start();
         });
     }
@@ -459,15 +460,13 @@ export default class KeyboardMonitorSnap extends Extension {
             this._learnFollowUp(window, sizedAt, draws, from, to, true);
             return;
         }
-        const timeline = new Clutter.Timeline({actor, duration: remaining});
+        const scope = new Scope();
+        const timeline = scope.timeline(new Clutter.Timeline({actor, duration: remaining}));
         const stop = () => {
             this._learners.delete(stop);
             if (this._learnerByWindow.get(window) === interrupt)
                 this._learnerByWindow.delete(window);
-            timeline.disconnectObject(this);
-            actor.disconnectObject(timeline);
-            window.disconnectObject?.(timeline);
-            timeline.stop();
+            scope.dispose();
         };
         const interrupt = () => {
             stop();
@@ -475,15 +474,15 @@ export default class KeyboardMonitorSnap extends Extension {
         };
         this._learners.add(stop);
         this._learnerByWindow.set(window, interrupt);
-        actor.connectObject('damaged', () => {
+        scope.connect(actor, 'damaged', () => {
             if (draws.length < 64)
                 draws.push(GLib.get_monotonic_time());
-        }, 'destroy', stop, timeline);
-        window.connectObject?.('unmanaging', stop, timeline);
-        timeline.connectObject('completed', () => {
+        }, 'destroy', stop);
+        scope.connect(window, 'unmanaging', stop);
+        scope.connect(timeline, 'completed', () => {
             stop();
             this._learnFollowUp(window, sizedAt, draws, from, to, true);
-        }, this);
+        });
         timeline.start();
     }
     // After an animation: how long after its first frame at the final size did the
@@ -586,15 +585,12 @@ export default class KeyboardMonitorSnap extends Extension {
         const visual = this._visuals.get(window);
         if (!visual)
             return;
-        const hold = new Clutter.Timeline({actor, duration: VISUAL_HOLD_MS});
+        const scope = new Scope();
+        const hold = scope.timeline(new Clutter.Timeline({actor, duration: VISUAL_HOLD_MS}));
         const started = GLib.get_monotonic_time();
-        // Clutter.Timeline.stop() emits 'stopped', not 'completed': every
-        // way out of the hold goes through detach to drop its handlers.
+        // Every way out of the hold goes through detach.
         const detach = () => {
-            hold.disconnectObject(this);
-            actor.disconnectObject(hold);
-            window.disconnectObject?.(hold);
-            hold.stop();
+            scope.dispose();
             if (visual.stopHold === detach)
                 visual.stopHold = null;
         };
@@ -608,14 +604,14 @@ export default class KeyboardMonitorSnap extends Extension {
             detach();
             this._clearVisual(window, false, actor);
         };
-        hold.connectObject('new-frame', () => {
+        scope.connect(hold, 'new-frame', () => {
             if (sameFrame(this._drawnFrame(window, actor).frame, target, 1))
                 end(true);
             else
                 this._showAt(window, actor, target, anchor);
-        }, 'completed', () => end(false), this);
-        actor.connectObject('destroy', gone, hold);
-        window.connectObject?.('unmanaging', gone, hold);
+        }, 'completed', () => end(false));
+        scope.connect(actor, 'destroy', gone);
+        scope.connect(window, 'unmanaging', gone);
         hold.start();
     }
     // `actor` is passed where known: an unmanaged window may no longer
@@ -628,7 +624,7 @@ export default class KeyboardMonitorSnap extends Extension {
         visual.stopHold?.();
         if (!actor)
             return;
-        actor.remove_clip?.();
+        actor.remove_clip();
         const identity = {scale_x: 1, scale_y: 1, translation_x: 0, translation_y: 0};
         if (smooth) {
             actor.ease({...identity, duration: RELAX_MS, mode: Clutter.AnimationMode.EASE_OUT_QUAD});
@@ -660,9 +656,7 @@ export default class KeyboardMonitorSnap extends Extension {
             const watch = stateWatch;
             stateWatch = null;
             if (watch) {
-                watch.timeline.disconnectObject(this);
-                actor.disconnectObject(watch.timeline);
-                watch.timeline.stop();
+                watch.scope.dispose();
                 watch.waiting?.();
             }
             if (stateCover) {
@@ -761,8 +755,9 @@ export default class KeyboardMonitorSnap extends Extension {
                 // Watch what the app draws from now on. The outcome is
                 // recorded as it happens, so it does not matter whether
                 // uncoverState is called before or after the time limit.
-                const timeline = new Clutter.Timeline({actor, duration: STATE_COVER_MAX_MS});
-                const watch = {timeline, lastDamage: GLib.get_monotonic_time(), damages: 0,
+                const scope = new Scope();
+                const timeline = scope.timeline(new Clutter.Timeline({actor, duration: STATE_COVER_MAX_MS}));
+                const watch = {scope, lastDamage: GLib.get_monotonic_time(), damages: 0,
                     started: GLib.get_monotonic_time(), expired: false, waiting: null};
                 stateWatch = watch;
                 const settled = () => watch.damages > 0 &&
@@ -773,7 +768,7 @@ export default class KeyboardMonitorSnap extends Extension {
                         ms: Math.round((GLib.get_monotonic_time()-watch.started)/1000)});
                     endState();
                 };
-                actor.connectObject('damaged', () => {
+                scope.connect(actor, 'damaged', () => {
                     watch.lastDamage = GLib.get_monotonic_time();
                     watch.damages++;
                     if (this._settings.get_boolean('debug-logging')) {
@@ -783,15 +778,15 @@ export default class KeyboardMonitorSnap extends Extension {
                             buffer:drawn.buffer, mutter:rect(window.get_frame_rect()),
                             mutterBuffer:rect(window.get_buffer_rect())})}`);
                     }
-                }, timeline);
-                timeline.connectObject('new-frame', () => {
+                });
+                scope.connect(timeline, 'new-frame', () => {
                     if (watch.waiting && settled())
                         watch.finish(true);
                 }, 'completed', () => {
                     watch.expired = true;
                     if (watch.waiting)
                         watch.finish(false);
-                }, this);
+                });
                 timeline.start();
             },
             // Resolves once the app has drawn after the state change and then
@@ -890,9 +885,7 @@ export default class KeyboardMonitorSnap extends Extension {
         }
         const owner = this._dependency.stateObj._keybindingHandler;
         this._busy.add(window);
-        const operation = {owner, cancelled:false,
-            cancel() {this.cancelled=true; this.cancelWait?.(); this.cancelAnimation?.(); this.cancelEffects?.();},
-            supersede() {if (!this.cancelled) {this.superseded=true; this.cancel();}}};
+        const operation = new Snap(owner);
         this._operations.set(window, operation);
         let intended = null;
         try {

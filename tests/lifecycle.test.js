@@ -121,14 +121,15 @@ const waitFor = (w, p, op) => new Promise((resolve, reject) => {
     let stable = 0;
     // The real wait gives up after 2 s; so does this one (simulated clock).
     const deadline = mock.clock + 2000000;
-    op.cancelWait = () => {if (!done) {done = true; op.cancelWait = null; reject(new Error('Placement cancelled'));}};
+    let unregister = () => {};
+    unregister = op.onCancel(() => {if (!done) {done = true; reject(new Error('Placement cancelled'));}});
     const poll = () => {
         if (done) return;
         if (op.cancelled) {done = true; reject(new Error('Placement cancelled')); return;}
         if (mock.clock > deadline) {done = true; reject(new Error('Placement timed out')); return;}
         // Like the real wait: true on two consecutive checks.
         if (p()) {
-            if (stable++ >= 1) {done = true; op.cancelWait = null; resolve(); return;}
+            if (stable++ >= 1) {done = true; unregister(); resolve(); return;}
         } else {
             stable = 0;
         }
