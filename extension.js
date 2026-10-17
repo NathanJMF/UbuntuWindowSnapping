@@ -501,10 +501,23 @@ export default class KeyboardMonitorSnap extends Extension {
         const startSize = this._drawnFrame(window, actor).frame;
         // The snapshot's own size, before any scaling.
         const natural = {width: cover.width, height: cover.height};
-        const growing = reveal && (to.width > from.width+3 || to.height > from.height+3);
-        const ease = growing ? easeInOutCubic : easeOutCubic;
+        const growX = reveal && to.width > from.width+3;
+        const growY = reveal && to.height > from.height+3;
+        const growing = growX || growY;
+        // Reveal eases each direction on its own: a growing direction starts
+        // gently (little to fill before the app has drawn), a shrinking one
+        // settles quickly (so a mixed move's uncovered strip goes fast).
+        const easeX = growX ? easeInOutCubic : easeOutCubic;
+        const easeY = growY ? easeInOutCubic : easeOutCubic;
+        // Reveal attaches content to the edge that stays put, or to the
+        // top-left (where apps lay out) when both edges move, so it travels
+        // with the window instead of sliding within it.
+        const anchor = reveal ? {x: exact.anchor.x === 0.5 ? 0 : exact.anchor.x,
+            y: exact.anchor.y === 0.5 ? 0 : exact.anchor.y} : exact.anchor;
+        let backdrop = null;
         if (growing) {
             global.window_group.set_child_above_sibling(cover, actor);
+            backdrop = effects.backdrop();
             actor.opacity = 255;
         } else if (reveal) {
             global.window_group.set_child_below_sibling(cover, actor);
@@ -522,7 +535,15 @@ export default class KeyboardMonitorSnap extends Extension {
             const smoothstep = u => u <= 0 ? 0 : u >= 1 ? 1 : u*u*(3-2*u);
             const endAt = elapsed => glide
                 ? interpolateRect(glide.from, end, smoothstep((elapsed-glide.at)/glide.ms)) : end;
-            const curveAt = elapsed => interpolateRect(from, endAt(elapsed), ease(elapsed/duration));
+            const curveAt = elapsed => {
+                const target = endAt(elapsed);
+                const t = elapsed/duration;
+                const along = (start, size, eased) => [Math.round(from[start]+(target[start]-from[start])*eased),
+                    Math.round(from[size]+(target[size]-from[size])*eased)];
+                const [x, width] = along('x', 'width', easeX(t));
+                const [y, height] = along('y', 'height', easeY(t));
+                return {x, y, width, height};
+            };
             // Elapsed time when the live window began to fade in, and how long
             // that fade lasts (read once per snap; live-tunable).
             const fadeLimit = this._settings.get_int('morph-fade');
@@ -580,6 +601,7 @@ export default class KeyboardMonitorSnap extends Extension {
                     actor.opacity = 255;
                     actor.remove_clip?.();
                     this._showAt(window, actor, end, exact);
+                    effects.dropBackdrop();
                     effects.dropCover(reveal && !growing ? 0 : fadeFrom === null ? Math.min(fadeLimit, MORPH_MIN_FADE_MS)
                         : Math.max(0, fadeMs-(elapsed-fadeFrom)));
                     this._hold(window, actor, end, exact);
@@ -605,20 +627,24 @@ export default class KeyboardMonitorSnap extends Extension {
                         reaim(elapsed, g, 'drawn');
                 }
                 const curve = curveAt(elapsed);
-                // Growing: once the app has drawn anything bigger than the
-                // snapshot, the live window underneath fills the outline.
-                const liveBigger = drawn.width > natural.width+3 || drawn.height > natural.height+3;
-                if (reveal) {
-                    // Scale up only where the snapshot is smaller, and only
-                    // while nothing bigger exists; crop the rest.
-                    const fill = !growing || !liveBigger;
-                    const width = fill ? Math.max(natural.width, curve.width) : natural.width;
-                    const height = fill ? Math.max(natural.height, curve.height) : natural.height;
-                    const x = alignOn(width, curve.x, curve.width, exact.anchor.x);
-                    const y = alignOn(height, curve.y, curve.height, exact.anchor.y);
-                    cover.set_position(x, y);
-                    cover.set_size(width, height);
-                    cover.set_clip(curve.x-x, curve.y-y, curve.width, curve.height);
+                const align = (width, height) => ({x: alignOn(width, curve.x, curve.width, anchor.x),
+                    y: alignOn(height, curve.y, curve.height, anchor.y)});
+                const fit = (widget, width, height) => {
+                    const at = align(width, height);
+                    widget.set_position(at.x, at.y);
+                    widget.set_size(width, height);
+                    widget.set_clip(curve.x-at.x, curve.y-at.y, curve.width, curve.height);
+                };
+                if (growing) {
+                    // Top: the old snapshot at its own size. Bottom: the same
+                    // image stretched to fill the outline, seen only where
+                    // neither crisp image reaches (a mixed move's corner).
+                    fit(cover, natural.width, natural.height);
+                    if (backdrop)
+                        fit(backdrop, Math.max(natural.width, curve.width), Math.max(natural.height, curve.height));
+                } else if (reveal) {
+                    // Shrinking: the snapshot is at least the outline's size.
+                    fit(cover, Math.max(natural.width, curve.width), Math.max(natural.height, curve.height));
                 } else {
                     cover.set_position(curve.x, curve.y);
                     cover.set_size(curve.width, curve.height);
@@ -641,7 +667,7 @@ export default class KeyboardMonitorSnap extends Extension {
                 if (growing) {
                     // Live window underneath at its true size throughout;
                     // the snapshot on top fades out from the handover.
-                    this._showRevealed(window, actor, curve, exact.anchor);
+                    this._showRevealed(window, actor, curve, anchor);
                     if (fadeFrom !== null)
                         cover.opacity = fadeMs <= 0 ? 0
                             : Math.round(255*(1-Math.min(1, (elapsed-fadeFrom)/fadeMs)));
@@ -650,7 +676,7 @@ export default class KeyboardMonitorSnap extends Extension {
                     // the snapshot underneath stays until the motion ends.
                     const f = fadeMs <= 0 ? 1 : Math.min(1, (elapsed-fadeFrom)/fadeMs);
                     actor.opacity = Math.round(255*f);
-                    this._showRevealed(window, actor, curve, exact.anchor);
+                    this._showRevealed(window, actor, curve, anchor);
                 } else if (fadeFrom !== null) {
                     actor.opacity = 255;
                     this._showAt(window, actor, curve, exact);
@@ -666,7 +692,7 @@ export default class KeyboardMonitorSnap extends Extension {
                     console.log(`${this.uuid}: FRAME ${JSON.stringify({id:window.get_id(), style:reveal ? 'reveal' : 'morph', elapsed,
                         curve, end, drawn, mutter:rect(window.get_frame_rect()), sized, ready, fadeFrom,
                         sinceDamage:Math.round((now-lastDamage)/1000), cover:cover.opacity, fadeMs, followUp,
-                        sinceSized:sizedAt === null ? null : Math.round((now-sizedAt)/1000), growing, liveBigger,
+                        sinceSized:sizedAt === null ? null : Math.round((now-sizedAt)/1000), growing, anchor,
                         scale:[actor.scale_x, actor.scale_y].map(v => Math.round(v*1000)/1000)})}`);
             }, 'completed', () => finish(), this);
             actor.connectObject('destroy', () => operation.cancel(),
@@ -917,6 +943,7 @@ export default class KeyboardMonitorSnap extends Extension {
     _effects(window, {morph = false} = {}) {
         const actor = window.get_compositor_private();
         let cover = null;
+        let backdrop = null;
         let hidden = false;
         // Skips requested and not yet used by a size change. GNOME's handler
         // (connected first) uses one per change; when several changes are
@@ -1001,6 +1028,19 @@ export default class KeyboardMonitorSnap extends Extension {
             // the morph fades it out itself.
             coversAll: morph,
             snapshot: () => cover,
+            // A second layer with the snapshot's image, under the window,
+            // stretched to fill the outline wherever no crisp image reaches.
+            backdrop: () => {
+                if (!cover || backdrop) return backdrop;
+                backdrop = new St.Widget({content: cover.content});
+                global.window_group.add_child(backdrop);
+                global.window_group.set_child_below_sibling(backdrop, actor);
+                return backdrop;
+            },
+            dropBackdrop: () => {
+                backdrop?.destroy();
+                backdrop = null;
+            },
             coverState: () => {
                 // The app's redraw for the new state is not a follow-up.
                 this._learnerByWindow.get(window)?.();
@@ -1096,6 +1136,8 @@ export default class KeyboardMonitorSnap extends Extension {
             },
             release: () => {
                 endState();
+                backdrop?.destroy();
+                backdrop = null;
                 if (cover) {
                     cover.destroy();
                     cover = null;

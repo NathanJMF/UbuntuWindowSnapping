@@ -109,7 +109,9 @@ const watchdog = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 60000, () => {
 });
 try {
 const {default:Ext, mock, signals, layout} = await import(Gio.File.new_for_path(path).get_uri());
-const AREAS = [{x:0, y:0, width:1000, height:800}, {x:1000, y:0, width:1000, height:800}];
+// Two landscape monitors and, when mock.monitors is 3, a portrait one.
+const AREAS = [{x:0, y:0, width:1000, height:800}, {x:1000, y:0, width:1000, height:800},
+    {x:2000, y:0, width:400, height:1000}];
 // A client that draws each requested size `lag` ms after the request.
 function makeWindow({frame = {x:100, y:100, width:600, height:400}, lag = 40, maximized = false, fullscreen = false} = {}) {
     const w = signals({maximizedHorizontally:maximized, maximizedVertically:maximized, fullscreen,
@@ -135,7 +137,10 @@ function makeWindow({frame = {x:100, y:100, width:600, height:400}, lag = 40, ma
         get_compositor_private() {return this.unmanaged ? null : this.actor;}, get_id:() => 1,
         get_frame_rect() {return {...this.frame};}, get_buffer_rect() {return {...this.frame};},
         allows_move() {return true;}, allows_resize() {return this.resizable;}, unminimize() {},
-        get_monitor() {const cx = this.frame.x+this.frame.width/2; return cx >= 1000 && mock.monitors > 1 ? 1 : 0;},
+        get_monitor() {
+            const cx = this.frame.x+this.frame.width/2;
+            return cx >= 2000 && mock.monitors > 2 ? 2 : cx >= 1000 && mock.monitors > 1 ? 1 : 0;
+        },
         // Mutter aborts on an index past the monitor count; record it instead.
         get_work_area_for_monitor:m => {if (m >= mock.monitors) mock.invalidMonitorCalls.push(`work_area(${m})`); return {...AREAS[m]};},
         move_frame() {}, move_to_monitor(m) {if (m >= mock.monitors) mock.invalidMonitorCalls.push(`move_to_monitor(${m})`);},
@@ -1065,11 +1070,13 @@ async function watchReveal(w, dir, steps = 120) {
     const p = press(dir);
     for (let i = 0; i < steps; i++) {
         await step(2);
-        const snap = mock.widgets[0];
+        const snap = mock.widgets[0], back = mock.widgets[1];
         if (!snap || snap.destroyed) continue;
         const a = w.actor;
         frames.push({snap:{width:snap.width, height:snap.height, clip:snap.clip && {...snap.clip}, below:snap.below,
                 opacity:snap.opacity}, drawnWidth:w.drawn.width, content:w.content,
+            back:back && !back.destroyed ? {width:back.width, height:back.height, below:back.below, clip:back.clip && {...back.clip}} : null,
+            top:w.drawn.y+a.translation_y,
             visible:a.opacity > 0, scale:[a.scale_x, a.scale_y], clip:a.clip && {...a.clip},
             left:w.drawn.x+a.translation_x, curve:e._visuals.get(w)?.rect && {...e._visuals.get(w).rect}});
     }
@@ -1122,9 +1129,39 @@ async function watchReveal(w, dir, steps = 120) {
     const stretch = Math.max(...before.map(x => x.snap.width/500));
     assert(before.length > 0 && stretch <= 1.06, `before the app draws bigger, at most a slight stretch (${stretch.toFixed(3)})`);
     assert(after.length > 10 && after.every(x => x.snap.width === 500), 'once the app has drawn bigger, the snapshot is never stretched');
+    assert(moving.every(x => x.back && x.back.below && x.back.width >= x.curve.width && x.back.height >= x.curve.height),
+        'growing: a backdrop under the window always covers the whole outline');
     assert(after.some(x => x.snap.opacity < 255) && moving.at(-1).snap.opacity < 255, 'snapshot fades out at the handover');
     assert(mock.widgets.every(x => x.destroyed) && w.maximizedHorizontally, 'growing: ends full, snapshots removed');
     clean(w, 'reveal growing');
+}
+
+// 22q. A mixed crossing like portrait -> main: narrow and tall (200x1000)
+// to wide and short (500x800), both horizontal edges moving. No part of the
+// outline is ever uncovered, the crisp snapshot is never stretched, content
+// stays attached to the outline's top-left, and the shrinking height
+// settles faster than the growing width.
+{
+    mock.monitors = 3;
+    const w = fresh({frame:{x:2000, y:0, width:200, height:1000}, lag:15});
+    mock.neighbor = 1;
+    e._states.set(w, {layout:{x:'left', y:null}, monitor:2, rect:{x:2000, y:0, width:200, height:1000},
+        frame:{x:2000, y:0, width:200, height:1000}});
+    const f = await watchReveal(w, 'left', 140);
+    const moving = f.filter(x => x.snap.clip);
+    assert(w.frame.x === 1500 && w.frame.width === 500 && w.frame.height === 800, 'crossed onto the right half of the landscape monitor');
+    assert(moving.length > 20 && moving.every(x => x.snap.width === 200 && x.snap.height === 1000), 'crisp snapshot never stretched');
+    assert(moving.every(x => x.back && x.back.below && x.back.width >= x.curve.width && x.back.height >= x.curve.height),
+        'backdrop always covers the whole outline (no see-through corners)');
+    const shown = moving.filter(x => x.visible);
+    assert(shown.every(x => x.left === x.curve.x && x.top === x.curve.y && x.scale[0] === 1),
+        'live window attached to the outline top-left, unscaled');
+    const early = moving[Math.floor(moving.length/4)];
+    const heightDone = (1000-early.curve.height)/200, widthDone = (early.curve.width-200)/300;
+    assert(heightDone > widthDone+0.2, `shrinking height settles faster than the growing width (${heightDone.toFixed(2)} vs ${widthDone.toFixed(2)})`);
+    assert(mock.widgets.every(x => x.destroyed), 'snapshot and backdrop removed');
+    clean(w, 'reveal mixed crossing');
+    mock.monitors = 2;
 }
 
 // 22o. Interrupting or closing a reveal leaves no clip behind.

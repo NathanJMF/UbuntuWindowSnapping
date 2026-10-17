@@ -381,3 +381,17 @@ Moving from the portrait monitor to the main one in reveal style left ghost imag
 Placements that change monitors now repaint the whole window layer on every animation frame, once when the motion ends, and once 20 ms later. The window layer includes the backgrounds, so it spans every monitor. This applies to all three styles; moves within one monitor are unaffected.
 
 Validation: 733 checks (121 rules, 77 adapter, 80 delayed placement, 455 lifecycle), including crossings in each style and same-monitor moves (which must not repaint), both mutation-checked.
+
+## Mixed reveal moves (version 28, experiment/animations branch)
+
+Version 27's repaints did not remove the "ghosts" on portrait → main crossings, because they were not stale pixels but gaps in reveal's own layering. That crossing is mixed: the window gets wider (600 → 1280 px) and shorter (1835 → 1355 px). Version 26 showed the live window (already drawn at 1280×1355 within ~9 ms) underneath at its true size, centred in an outline still up to 1835 px tall, with the old 600 px-wide snapshot on top. The corners covered by neither image showed whatever was behind them, appearing at the destination monitor's height. Centring (used when both edges move) also made content slide within the outline instead of following its trailing edge.
+
+For reveal moves where anything grows:
+
+- **No gaps.** A backdrop layer (the snapshot's image, stretched to fill the outline) sits under the window. It is visible only where neither crisp image reaches, such as the corner of a mixed move. The crisp snapshot on top always keeps its own size.
+- **Edge-attached content.** When both edges of an axis move, content aligns to the outline's top-left (where apps lay out) instead of its centre, so it travels with the window.
+- **Per-direction easing.** A growing direction starts gently (ease-in-out); a shrinking direction settles quickly (ease-out), so a mixed move's uncovered strip disappears early.
+
+The crossing repaint from version 27 is kept.
+
+Validation: 746 checks (121 rules, 77 adapter, 80 delayed placement, 468 lifecycle), including a mock portrait monitor reproducing the narrow-and-tall to wide-and-short crossing. Each behaviour was mutation-checked.
