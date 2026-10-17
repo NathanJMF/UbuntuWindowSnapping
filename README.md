@@ -290,3 +290,17 @@ GSETTINGS_SCHEMA_DIR="$PWD/schemas" gsettings set org.gnome.shell.extensions.key
 ```
 
 Validation: 478 checks (121 rules, 77 adapter, 79 delayed placement, 201 lifecycle), including morphs with a lagging client, a minimum-size client, a window closed mid-morph, an interrupted morph, and a morph from maximized. Each morph behaviour was mutation-checked.
+
+## Re-aiming morphs and settled handover (version 20, experiment/animations branch)
+
+Versions 18–19 (parked on `experiment/morph-quiet-handover`) broke window movement. Version 18 read Mutter's frame straight after the size request, assuming it already showed the granted size. For most Wayland clients Mutter only updates it once the client acknowledges, so 68 of 76 morphs aimed at the old size or at the restored floating size: the window was squeezed into the wrong rectangle, then corrected about 250 ms late. The test mock had updated the frame instantly, which hid this.
+
+Version 20, built on version 17:
+
+- **Realistic mock.** In `tests/lifecycle.test.js`, Mutter's frame now changes when the client draws (acknowledges) a size; `frameOnRequest` models X11. Version 18's code fails these tests.
+- **Re-aim on what the app draws.** The morph aims at the requested size. If the app then draws a different size that Mutter confirms, the morph re-aims there. The target must sit on the requested edges and be at least the requested size, since a minimum size only enlarges. That rejects a floating size drawn late after unmaximizing. The end point glides to the new target over 40 ms, eased at both ends, so neither position nor speed jumps. An app that never visibly resizes is not re-aimed, because Mutter's frame cannot tell "not answered yet" from "answered with the same size"; it falls back to version 17's hold.
+- **Settled handover (from version 19).** The live window takes over only after the app has drawn the final size and then nothing new for 24 ms (window actor `damaged` signal). This skips Chromium's first frame at a new size, which still has the old layout. Constant redraws, such as video, still hand over at 60% of the motion.
+
+`FRAME` logs include `end`, `mutter`, `sized`, `ready` and `sinceDamage`; re-aims log a `morph-reaim` trace.
+
+Validation: 516 checks (121 rules, 77 adapter, 79 delayed placement, 239 lifecycle), including a minimum-size app, a late floating draw, an X11-style frame, a 300 ms app, a re-laying-out app and video. Each behaviour was mutation-checked; the one surviving mutation (dropping the drawn-equals-Mutter-frame check) only removes a redundant guard.

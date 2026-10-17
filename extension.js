@@ -22,6 +22,13 @@ const COVER_FADE_MS = 120;
 // (minimum-size apps never reach the requested size).
 const MORPH_FADE_MS = 70;
 const MORPH_READY_LIMIT = 0.6;
+// Chromium-based apps often present their first frame at a new size with
+// the old layout, then re-lay out a frame or two later. The handover waits
+// until the app has drawn the final size and then nothing new for this long.
+const MORPH_QUIET_MS = 24;
+// A re-aimed morph glides its end point to the new target over this long
+// (eased at both ends), so neither position nor speed jumps.
+const MORPH_REAIM_MS = 40;
 // Confirmation checks run about once per frame, starting immediately, so a
 // state that is already true settles in one frame instead of two 25 ms polls.
 const SETTLE_POLL_MS = 16;
@@ -429,20 +436,53 @@ export default class KeyboardMonitorSnap extends Extension {
         if (!base || !actor || !cover)
             return this._animate(window, from, to, apply, operation);
         const duration = travelDuration(base, from, to);
-        const anchor = anchorFor(from, to);
-        const exact = {anchor, maxStretch: null, growth: {x: 0, y: 0}};
+        const exact = {anchor: anchorFor(from, to), maxStretch: null, growth: {x: 0, y: 0}};
         this._trace(window, 'animate', {from, to, duration, style: 'morph',
             client: window.get_client_type?.() === Meta.WindowClientType.X11 ? 'x11' : 'wayland'});
         this._visuals.get(window)?.stopHold?.();
         actor.remove_all_transitions();
         this._exactUntil.delete(window);
+        const startSize = this._drawnFrame(window, actor).frame;
         // One request for the final size; nothing in between.
         apply(to);
         return new Promise((resolve, reject) => {
             const timeline = new Clutter.Timeline({actor, duration});
+            // The curve eases from `from` towards an end point. A re-aim
+            // glides that end point from its current value to the new target
+            // (smoothstep, finishing before the motion does), so the window's
+            // position and speed both stay continuous.
+            let end = to;
+            let glide = null;
+            const smoothstep = u => u <= 0 ? 0 : u >= 1 ? 1 : u*u*(3-2*u);
+            const endAt = elapsed => glide
+                ? interpolateRect(glide.from, end, smoothstep((elapsed-glide.at)/glide.ms)) : end;
+            const curveAt = elapsed => interpolateRect(from, endAt(elapsed), easeOutCubic(elapsed/duration));
             // Elapsed time when the live window began to fade in.
             let fadeFrom = null;
+            // When the app last drew anything (the snapshot counts as drawn).
+            let lastDamage = GLib.get_monotonic_time();
             let finished = false;
+            const sameSize = (a, b) => Math.abs(a.width-b.width) <= 3 && Math.abs(a.height-b.height) <= 3;
+            // Mutter's frame, once the app has acknowledged the request, is
+            // the size it was granted (e.g. widened to a minimum width). Only
+            // trusted on the requested edges, and only if at least the
+            // requested size: a minimum only ever enlarges. That rejects a
+            // late-drawn floating size after unmaximizing, which can look
+            // like an answer.
+            const granted = () => {
+                const g = rect(window.get_frame_rect());
+                const aligned = (at, size) => Math.abs(g[at]-to[at]) <= 3 ||
+                    Math.abs(g[at]+g[size]-to[at]-to[size]) <= 3;
+                return g.width >= to.width-3 && g.height >= to.height-3 &&
+                    aligned('x', 'width') && aligned('y', 'height') ? g : null;
+            };
+            const reaim = (elapsed, target, why) => {
+                const current = endAt(elapsed);
+                glide = {from: current, at: elapsed,
+                    ms: Math.max(1, Math.min(MORPH_REAIM_MS, duration-elapsed))};
+                end = target;
+                this._trace(window, 'morph-reaim', {why, elapsed, from:current, to:target});
+            };
             const finish = error => {
                 if (finished) return;
                 finished = true;
@@ -456,10 +496,10 @@ export default class KeyboardMonitorSnap extends Extension {
                     // The live window takes over; an unfinished fade completes
                     // on its own while the hold keeps the window on target.
                     actor.opacity = 255;
-                    this._showAt(window, actor, to, exact);
+                    this._showAt(window, actor, end, exact);
                     effects.dropCover(fadeFrom === null ? MORPH_FADE_MS
                         : Math.max(0, MORPH_FADE_MS-(elapsed-fadeFrom)));
-                    this._hold(window, actor, to, exact);
+                    this._hold(window, actor, end, exact);
                 } else if (!operation.superseded) {
                     this._clearVisual(window, false, actor);
                 }
@@ -468,12 +508,24 @@ export default class KeyboardMonitorSnap extends Extension {
             operation.cancelAnimation = () => finish(new Error('Placement cancelled'));
             timeline.connectObject('new-frame', () => {
                 const elapsed = timeline.get_elapsed_time();
-                const curve = interpolateRect(from, to, easeOutCubic(elapsed/duration));
+                const now = GLib.get_monotonic_time();
+                const drawn = this._drawnFrame(window, actor).frame;
+                const late = elapsed >= MORPH_READY_LIMIT*duration;
+                // Re-aim at the size the app really takes, once it has drawn a
+                // new size that Mutter confirms. Mutter's frame alone cannot
+                // tell "not answered yet" from "answered with the old size",
+                // so an app that never visibly resizes is not re-aimed.
+                if (fadeFrom === null && !sameSize(drawn, end) && !sameSize(drawn, startSize)) {
+                    const g = granted();
+                    if (g && sameSize(drawn, g) && !sameSize(g, end))
+                        reaim(elapsed, g, 'drawn');
+                }
+                const curve = curveAt(elapsed);
                 cover.set_position(curve.x, curve.y);
                 cover.set_size(curve.width, curve.height);
-                const drawn = this._drawnFrame(window, actor).frame;
-                const ready = Math.abs(drawn.width-to.width) <= 3 && Math.abs(drawn.height-to.height) <= 3;
-                if (fadeFrom === null && (ready || elapsed >= MORPH_READY_LIMIT*duration))
+                const sized = sameSize(drawn, end);
+                const ready = sized && now-lastDamage >= MORPH_QUIET_MS*1000;
+                if (fadeFrom === null && (ready || late))
                     fadeFrom = elapsed;
                 if (fadeFrom !== null) {
                     actor.opacity = 255;
@@ -487,10 +539,12 @@ export default class KeyboardMonitorSnap extends Extension {
                 }
                 if (this._settings.get_boolean('debug-logging'))
                     console.log(`${this.uuid}: FRAME ${JSON.stringify({id:window.get_id(), style:'morph', elapsed,
-                        curve, drawn, ready, fadeFrom, cover:cover.opacity,
+                        curve, end, drawn, mutter:rect(window.get_frame_rect()), sized, ready, fadeFrom,
+                        sinceDamage:Math.round((now-lastDamage)/1000), cover:cover.opacity,
                         scale:[actor.scale_x, actor.scale_y].map(v => Math.round(v*1000)/1000)})}`);
             }, 'completed', () => finish(), this);
-            actor.connectObject('destroy', () => operation.cancel(), timeline);
+            actor.connectObject('destroy', () => operation.cancel(),
+                'damaged', () => {lastDamage = GLib.get_monotonic_time();}, timeline);
             window.connectObject?.('unmanaging', () => operation.cancel(), timeline);
             timeline.start();
         });

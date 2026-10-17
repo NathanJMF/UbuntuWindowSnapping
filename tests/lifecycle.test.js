@@ -130,10 +130,14 @@ function makeWindow({frame = {x:100, y:100, width:600, height:400}, lag = 40, ma
         move_frame() {}, move_to_monitor(m) {if (m >= mock.monitors) mock.invalidMonitorCalls.push(`move_to_monitor(${m})`);},
         unmake_fullscreen() {this.fullscreen = false; sizeChange();},
         unmaximize() {
-            // Mutter restores the saved floating frame on unmaximize.
+            // Mutter restores the saved floating frame on unmaximize; with
+            // floatingLag the app draws it that much later.
             const apply = () => {
                 this.maximizedHorizontally = this.maximizedVertically = false;
-                if (this.floating) {this.frame = {...this.floating}; this.drawn = {...this.floating};}
+                if (!this.floating) return;
+                this.frame = {...this.floating};
+                if (this.floatingLag) this.queue.push({due:mock.clock + this.floatingLag*1000, r:{...this.floating}});
+                else this.drawn = {...this.floating};
             };
             sizeChange();
             // lateUnmaximize: the state change lands that many steps later.
@@ -144,13 +148,17 @@ function makeWindow({frame = {x:100, y:100, width:600, height:400}, lag = 40, ma
         },
         maximize() {this.maximizedHorizontally = this.maximizedVertically = true;
             this.frame = this.get_work_area_for_monitor(this.get_monitor()); this.drawn = {...this.frame}; sizeChange();},
+        // Wayland: Mutter's frame changes when the client acknowledges a size,
+        // which is when it draws it (after its lag). frameOnRequest models
+        // X11, where the frame changes at once. Size limits (minWidth) are
+        // applied to what the client draws.
         move_resize_frame(u, x, y, width, height) {
-            width = Math.max(this.minWidth ?? 0, width);
-            this.frame = {x, y, width, height};
-            this.requests.push({...this.frame});
+            const granted = {x, y, width:Math.max(this.minWidth ?? 0, width), height};
+            this.requests.push({x, y, width, height});
+            if (this.frameOnRequest) this.frame = {...granted};
             const lag = typeof this.lag === 'function' ? this.lag() : this.lag;
             const due = Math.max(mock.clock + lag*1000, this.queue.at(-1)?.due ?? 0);
-            this.queue.push({due, r:{...this.frame}});
+            this.queue.push({due, r:granted});
         },
     });
     w.lag = lag;
@@ -190,8 +198,29 @@ const flush = async () => {
 let win = null;
 const step = async (ms = 4) => {
     mock.clock += ms*1000;
-    while (win && win.queue.length && mock.clock >= win.queue[0].due)
-        win.drawn = win.queue.shift().r;
+    // Every drawn frame damages the actor. A `relayout` client (Chromium)
+    // first shows the old layout at a new size and re-lays out that many ms
+    // later; a `video` client redraws on every step.
+    while (win && win.queue.length && mock.clock >= win.queue[0].due) {
+        const r = win.queue.shift().r;
+        const resized = r.width !== win.drawn.width || r.height !== win.drawn.height;
+        win.drawn = r;
+        win.frame = {...r};
+        if (resized && win.relayout) {
+            win.content = 'stale';
+            win.relayoutAt = mock.clock + win.relayout*1000;
+        } else if (resized) {
+            win.content = 'laid-out';
+        }
+        win.actor.emit('damaged');
+    }
+    if (win?.relayoutAt && mock.clock >= win.relayoutAt) {
+        win.relayoutAt = null;
+        win.content = 'laid-out';
+        win.actor.emit('damaged');
+    }
+    if (win?.video)
+        win.actor.emit('damaged');
     for (const t of [...mock.timelines]) t.tick(ms);
     mock.timelines = mock.timelines.filter(t => !t.stopped);
     mock.later.splice(0).forEach(f => f());
@@ -676,26 +705,120 @@ const halfState = w => e._states.set(w, {layout:{x:'left', y:null}, monitor:0,
     clean(w, 'morph');
 }
 
-// 22. A minimum-size app never reaches the target: the fade starts at 60%
-// of the motion anyway and everything is cleaned up.
-{
-    const w = fresh({frame:{...AREAS[0]}});
-    w.minWidth = 700;
-    e._states.set(w, {layout:{x:null, y:null}, monitor:0, rect:{...AREAS[0]}, frame:{...AREAS[0]}});
+// Watch a morph: when the live window first shows, its content then, the
+// snapshot's path, re-aims, and the hold target.
+async function watchMorph(w, dir, {stepMs = 4, steps = 80} = {}) {
     mock.widgets = [];
+    const result = {shownAt:null, content:null, reaims:[], holds:[]};
+    const realTrace = e._trace.bind(e), realHold = e._hold.bind(e);
+    e._trace = (w_, phase, extra) => {if (phase === 'morph-reaim') result.reaims.push(extra); realTrace(w_, phase, extra);};
+    e._hold = (w_, actor, target, shape) => {result.holds.push({...target}); realHold(w_, actor, target, shape);};
     const start = mock.clock;
-    let shownAt = null;
-    const p = press('left');
-    for (let i = 0; i < 80; i++) {
-        await step(4);
-        if (shownAt === null && w.actor.opacity === 255 && e._visuals.has(w)) shownAt = (mock.clock-start)/1000;
+    const p = press(dir);
+    for (let i = 0; i < steps; i++) {
+        await step(stepMs);
+        if (result.shownAt === null && w.actor.opacity === 255 && e._visuals.has(w)) {
+            result.shownAt = (mock.clock-start)/1000;
+            result.content = w.content;
+        }
     }
     await settle(800);
     await p;
-    // Full -> left half lasts 90 ms at the 120 ms base; 60% of that is 54 ms.
-    assert(shownAt !== null && shownAt <= 62, `live window fades in at 60% of the motion without reaching the target (at ${shownAt} ms)`);
-    assert(w.drawn.width === 700 && mock.widgets.every(x => x.destroyed), 'minimum width kept, snapshot gone');
+    e._trace = realTrace; e._hold = realHold;
+    result.moves = mock.widgets[0]?.moves ?? [];
+    return result;
+}
+const fullState = w => e._states.set(w, {layout:{x:null, y:null}, monitor:0, rect:{...AREAS[0]}, frame:{...AREAS[0]}});
+// Largest change in per-frame speed of the snapshot's width: smooth easing
+// changes it by a pixel or two, a jump shows as a spike.
+const maxJump = moves => {
+    const speed = moves.slice(1).map((m, i) => m.width-moves[i].width);
+    return Math.max(...speed.slice(1).map((v, i) => Math.abs(v-speed[i])));
+};
+
+// 22. A minimum-size app (700 px) asked for 500 px: once it draws 700 px,
+// the morph re-aims there smoothly, hands over after the content goes
+// quiet, and holds at 700 px, so nothing is squeezed and relaxed afterwards.
+{
+    const w = fresh({frame:{...AREAS[0]}, lag:20});
+    w.minWidth = 700;
+    fullState(w);
+    const r = await watchMorph(w, 'left', {stepMs:2, steps:120});
+    assert(r.reaims.length === 1 && r.reaims[0].why === 'drawn' && r.reaims[0].to.width === 700,
+        `re-aimed at the drawn 700 px (${JSON.stringify(r.reaims)})`);
+    assert(r.moves.at(-1).width === 700, 'snapshot ends at the granted 700 px');
+    assert(maxJump(r.moves) <= 12, `snapshot path continuous through the re-aim (largest speed change ${maxJump(r.moves)} px/frame)`);
+    // Drawn at 20 ms, quiet for 24 ms: about 44 ms (60% of 90 ms is 54 ms).
+    assert(r.shownAt !== null && r.shownAt >= 42 && r.shownAt <= 50, `handover once drawn and quiet (at ${r.shownAt} ms)`);
+    assert(r.holds.length === 1 && r.holds[0].width === 700, 'hold at the granted size: no squeeze and relax');
+    assert(mock.widgets.every(x => x.destroyed), 'snapshot gone');
     clean(w, 'morph minimum size');
+}
+
+// 22a. From maximized, the app draws its restored floating size only after
+// the morph has started. That is not an answer to the request and must not
+// be re-aimed at (it sits on the target's top-left edges).
+{
+    const w = fresh({frame:{...AREAS[0]}, maximized:true, lag:30});
+    w.floating = {x:0, y:0, width:600, height:400};
+    w.floatingLag = 12;
+    const r = await watchMorph(w, 'left', {stepMs:2, steps:120});
+    assert(r.reaims.length === 0, `no re-aim at the late floating size (${JSON.stringify(r.reaims)})`);
+    assert(r.moves.at(-1).width === 500 && r.moves.at(-1).height === 800, 'snapshot ends at the left half');
+    clean(w, 'morph late floating');
+}
+
+// 22b. An X11-style app, whose Mutter frame changes at once: nothing to
+// re-aim, and the snapshot still ends at the requested size.
+{
+    const w = fresh({frame:{...AREAS[0]}, lag:30});
+    w.frameOnRequest = true;
+    fullState(w);
+    const r = await watchMorph(w, 'left');
+    assert(r.reaims.length === 0, 'no re-aim when the granted size is the requested one');
+    assert(r.moves.at(-1).width === 500, 'snapshot ends at the requested size');
+    clean(w, 'morph X11 frame');
+}
+
+// 22c. A very slow app (300 ms): the live window fades in at 60% anyway.
+{
+    const w = fresh({frame:{...AREAS[0]}, lag:300});
+    fullState(w);
+    const r = await watchMorph(w, 'left');
+    // Full -> left half lasts 90 ms; 60% is 54 ms.
+    assert(r.shownAt !== null && r.shownAt <= 62, `slow app: handover at 60% of the motion (at ${r.shownAt} ms)`);
+    assert(r.reaims.length === 0 && r.moves.at(-1).width === 500,
+        'slow app: no re-aim at the unanswered old size; snapshot ends at the requested size');
+    clean(w, 'morph slow app');
+}
+
+// 22d. Chromium-style relayout: the first frame at the new size still has
+// the old layout; the handover waits for the re-laid-out frame. A 240 ms
+// base (180 ms motion, fallback at 108 ms) keeps the two apart.
+{
+    mock.ints['animation-duration'] = 240;
+    const w = fresh({frame:{x:0, y:0, width:500, height:800}, lag:20});
+    w.relayout = 10;
+    halfState(w);
+    const r = await watchMorph(w, 'right', {stepMs:2, steps:120});
+    mock.ints['animation-duration'] = 120;
+    assert(r.content === 'laid-out', `handed over only after the re-layout (saw ${r.content})`);
+    // Drawn at 20 ms, re-laid out at 30 ms, then 24 ms quiet: about 54 ms.
+    assert(r.shownAt >= 52 && r.shownAt <= 60, `handover once content went quiet (at ${r.shownAt} ms)`);
+    clean(w, 'morph relayout');
+}
+
+// 22e. Constant redraws (video): never quiet, so the handover is at 60%.
+{
+    mock.ints['animation-duration'] = 240;
+    const w = fresh({frame:{x:0, y:0, width:500, height:800}, lag:20});
+    w.video = true;
+    halfState(w);
+    const r = await watchMorph(w, 'right', {stepMs:2, steps:120});
+    w.video = false;
+    mock.ints['animation-duration'] = 120;
+    assert(r.shownAt >= 106 && r.shownAt <= 112, `video: handover at 60% of the motion (at ${r.shownAt} ms)`);
+    clean(w, 'morph video');
 }
 
 // 23. Closing mid-morph removes the snapshot and stops driving the window.
