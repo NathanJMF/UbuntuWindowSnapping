@@ -20,7 +20,7 @@
         <choice value="morph"/>
         <choice value="reveal"/>
       </choices>
-      <default>'live'</default>
+      <default>'reveal'</default>
       <summary>live: the window resizes live along the curve; morph: a snapshot moves along the curve and the final layout fades in; reveal: like morph, but content is cropped by the moving edge instead of squished</summary>
     </key>
     <key name="morph-fade" type="i">

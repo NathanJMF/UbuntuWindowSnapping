@@ -395,3 +395,7 @@ For reveal moves where anything grows:
 The crossing repaint from version 27 is kept.
 
 Validation: 746 checks (121 rules, 77 adapter, 80 delayed placement, 468 lifecycle), including a mock portrait monitor reproducing the narrow-and-tall to wide-and-short crossing. Each behaviour was mutation-checked.
+
+## Default animation style (version 28, schema default)
+
+`animation-style` now defaults to `reveal`, the style used day to day and given the most development and testing. `live` and `morph` remain selectable. All other defaults already matched the values in use (debug logging stays off by default, and on for test-branch installs).
