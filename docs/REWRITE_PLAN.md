@@ -12,9 +12,19 @@ Branch: `rewrite`, from `main` at version 29 (`known-good-v29`). Nothing on this
 | 3 Lifetimes | Done: `scope.js` (`Scope`, `Snap`). |
 | 4 Split | Done: `reveal.js`, `visuals.js`, `effects.js`, `follow-up-tracker.js`, `bindings.js`, `trace.js`; `extension.js` went from 1162 to 437 lines. Also fixed: Super+Arrow on the desktop-icons layer timed out after 2 s in version 29. |
 | 5 Performance | Partly done: debug flag cached; one geometry read per frame. Deferred: signal-driven waits (gain at most one frame of confirmation latency; real Chromium ordering risk) and targeted crossing repaints (the ghosts turned out to be a layering gap fixed in version 28, so the repaint may not be needed at all). Both should be decided with live measurements. |
-| 6 Review and live check | Pending; installing awaits approval. |
+| 6 Review and live check | Review done; findings fixed (below). The live check awaits approval. |
 
-All suites pass (649+ checks) and the mutation sweep guards every listed behaviour, with one known, documented survivor.
+All suites pass (754 checks) and the mutation sweep guards every listed behaviour (46), with one known, documented survivor.
+
+### Independent review findings (phase 6), all addressed
+
+- **No regressions** found in the moved logic.
+- **Window filter too broad:** the desktop-icons fix also skipped dialogs, utility windows and movable skip-taskbar apps that version 29 snaps. Now only desktop, dock and splash windows, and fixed skip-taskbar windows, are ignored; tests cover both sides.
+- **Disable order:** follow-up observations are stopped after placements are cancelled (cancelling can start one).
+- **Debug flag:** subscribes to changes before reading the key.
+- **Early cancel:** an animation whose snap is already cancelled sets nothing up.
+- **Test gaps:** 13 behaviours (present in version 29 too) were not guarded by any test: hold stopped by a new motion or by actor destruction, the growing fade's tail, the final crossing repaint, re-aim restarting the size wait, granted-frame edge check, cancel on close, unregistering cancel hooks (animation and the real wait), timer removal on disable, smooth relax on a rejected window. Each now has a test and a sweep entry. The mocks gained recorded ease durations, restartable timelines and unique timer ids.
+- **Cleanups:** `Visuals.clear` renamed `reset` (it overrode `Map.clear`); effects take only `debug`; the `FRAME` `sized` field means the current frame again, as in version 29.
 
 ## Goal
 

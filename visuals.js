@@ -105,11 +105,11 @@ export class Visuals extends Map {
         const end = caughtUp => {
             detach();
             this._trace(window, 'visual-hold', {caughtUp, ms: Math.round((GLib.get_monotonic_time()-started)/1000)});
-            this.clear(window, !caughtUp, actor);
+            this.reset(window, !caughtUp, actor);
         };
         const gone = () => {
             detach();
-            this.clear(window, false, actor);
+            this.reset(window, false, actor);
         };
         scope.connect(timeline, 'new-frame', () => {
             if (sameFrame(drawnFrame(window, actor).frame, target, 1))
@@ -123,10 +123,10 @@ export class Visuals extends Map {
     }
 
     // Drop the window's visual state and return its actor to normal,
-    // smoothly or at once. `actor` is passed where known: an unmanaged
-    // window may no longer report its actor while GNOME's close effect
-    // still shows it.
-    clear(window, smooth, actor = window.get_compositor_private()) {
+    // smoothly or at once (reset, not clear: Map.clear empties the map).
+    // `actor` is passed where known: an unmanaged window may no longer
+    // report its actor while GNOME's close effect still shows it.
+    reset(window, smooth, actor = window.get_compositor_private()) {
         const visual = this.get(window);
         if (!visual)
             return;
@@ -144,8 +144,8 @@ export class Visuals extends Map {
         }
     }
 
-    clearAll() {
+    resetAll() {
         for (const window of [...this.keys()])
-            this.clear(window, false);
+            this.reset(window, false);
     }
 }

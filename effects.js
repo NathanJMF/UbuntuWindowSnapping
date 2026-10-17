@@ -17,8 +17,8 @@ export const STATE_COVER_MAX_MS = 150;
 
 // window: the placed window. animating(): whether animations are on.
 // visuals: the Visuals map (where the window is drawn). followUps: the
-// FollowUpTracker. trace(window, phase, extra) and log(text) when debugging.
-export function createEffects(window, {animating, visuals, followUps, trace, debug}) {
+// FollowUpTracker. debug: the Debug logger.
+export function createEffects(window, {animating, visuals, followUps, debug}) {
     const actor = window.get_compositor_private();
     let cover = null;
     let backdrop = null;
@@ -147,7 +147,7 @@ export function createEffects(window, {animating, visuals, followUps, trace, deb
             watch.finish = done => {
                 if (stateWatch !== watch)
                     return;
-                trace(window, 'state-cover', {settled: done, damages: watch.damages,
+                debug.trace(window, 'state-cover', {settled: done, damages: watch.damages,
                     ms: Math.round((GLib.get_monotonic_time()-watch.started)/1000)});
                 endState();
             };

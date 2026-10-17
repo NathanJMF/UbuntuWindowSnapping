@@ -5,7 +5,7 @@
 // have minimum sizes, or redraw constantly).
 import GLib from 'gi://GLib';
 import {anchorFor} from '../geometry.js';
-import {mock, signals, Main} from './support/gnome.js';
+import {mock, signals, Main, St} from './support/gnome.js';
 import {loadExtension} from './support/load.js';
 let count = 0;
 let lastPassed = '(none)';
@@ -50,7 +50,7 @@ function makeWindow({frame = {x:100, y:100, width:600, height:400}, lag = 40, ma
         get_compositor_private() {return this.unmanaged ? null : this.actor;}, get_id:() => 1,
         get_window_type() {return this.windowType ?? 0;}, skip_taskbar:false, get_client_type:() => 0, get_wm_class:() => 'test',
         get_frame_rect() {return {...this.frame};}, get_buffer_rect() {return {...this.frame};},
-        allows_move() {return true;}, allows_resize() {return this.resizable;}, unminimize() {},
+        allows_move() {return this.movable ?? true;}, allows_resize() {return this.resizable;}, unminimize() {},
         get_monitor() {
             const cx = this.frame.x+this.frame.width/2;
             return cx >= 2000 && mock.monitors > 2 ? 2 : cx >= 1000 && mock.monitors > 1 ? 1 : 0;
@@ -499,7 +499,7 @@ for (const signal of [true, false]) {
     e._visuals.hold(w, w.actor, {x:0, y:0, width:500, height:800}, {x:0, y:0});
     mock.halfEase = true;
     w.actor.scale_x = 1.04;
-    e._visuals.clear(w, true, w.actor);
+    e._visuals.reset(w, true, w.actor);
     mock.halfEase = false;
     const displayed = e._visuals.displayedRect(w);
     assert(displayed && displayed.width === 510, 'relax half way is drawn 510 px wide');
@@ -987,7 +987,8 @@ for (const style of ['reveal']) {
 // 22r. The desktop-icons layer (a maximized, unmovable window that skips
 // the taskbar) and other non-application windows are never snapped: no
 // snapshot, no request, no 2 s wait for an unmaximize that never comes.
-for (const [label, opts] of [['skip-taskbar', {skip_taskbar: true}], ['desktop type', {windowType: 1}]]) {
+for (const [label, opts] of [['desktop icons', {skip_taskbar: true, movable: false}],
+    ['desktop type', {windowType: 1}], ['dock type', {windowType: 2}], ['splash type', {windowType: 7}]]) {
     const w = fresh({frame:{x:0, y:0, width:1000, height:800}, maximized:true});
     Object.assign(w, opts);
     w.resizable = false;
@@ -999,6 +1000,18 @@ for (const [label, opts] of [['skip-taskbar', {skip_taskbar: true}], ['desktop t
     assert(!failed && w.requests.length === 0 && mock.widgets.length === 0 && w.maximizedHorizontally,
         `${label}: window left alone`);
     clean(w, `${label} ignored`);
+}
+// Dialogs, utility windows and movable skip-taskbar windows snap as before.
+for (const [label, opts] of [['dialog', {windowType: 3}], ['modal dialog', {windowType: 4}],
+    ['utility', {windowType: 6}], ['movable skip-taskbar', {skip_taskbar: true}]]) {
+    const w = fresh({frame:{x:300, y:200, width:600, height:500}});
+    Object.assign(w, opts);
+    const p = press('left');
+    await finishes(p, `${label} snap`);
+    await settle(300);
+    assert(w.requests.length > 0 && w.frame.x === 0 && w.frame.width === 500 && w.frame.height === 800,
+        `${label}: snapped left`);
+    clean(w, `${label} snapped`);
 }
 
 // 23. Closing mid-animation removes the snapshot and stops driving the window.
@@ -1053,6 +1066,199 @@ for (const [label, opts] of [['skip-taskbar', {skip_taskbar: true}], ['desktop t
         'outline goes from full to the left half');
     assert(mock.widgets[0].moves.every(m => m.width === 1000), 'shrinking: the snapshot is cropped, never squished');
     clean(w, 'from maximized');
+}
+
+// 26. Cleanup and cancellation paths, each checked directly.
+const running = since => mock.timelines.slice(since).filter(t => t.running && !t.stopped);
+// 26a. A new motion stops the hold still running from the last one.
+{
+    const w = fresh({frame:{x:0, y:0, width:500, height:800}});
+    halfState(w);
+    e._visuals.set(w, {rect:{...w.frame}});
+    e._visuals.hold(w, w.actor, {x:0, y:0, width:123, height:456}, {x:0, y:0});
+    const visual = e._visuals.get(w);
+    const stop = visual.stopHold;
+    let stopped = false;
+    visual.stopHold = () => {stopped = true; stop();};
+    mock.widgets = [];
+    const p = press('right');
+    for (let i = 0; i < 30 && !mock.widgets[0]?.clip; i++) await step(4);
+    assert(mock.widgets[0]?.clip && stopped, 'the old hold is stopped when the new motion starts');
+    await settle(600);
+    await p;
+    clean(w, 'motion over a hold');
+}
+// 26b. The hold ends at once when the actor is destroyed.
+{
+    const w = fresh();
+    e._visuals.set(w, {rect:{...w.frame}});
+    e._visuals.hold(w, w.actor, {x:0, y:0, width:123, height:456}, {x:0, y:0});
+    w.actor.emit('destroy');
+    assert(!e._visuals.has(w) && w.actor._h.length === 0 && w._h.length === 0,
+        'destroyed actor: hold state and handlers gone');
+}
+// 26c. A window that cannot be resized is let go smoothly from where it is
+// drawn (an interrupted motion's transform eases back, it does not jump).
+{
+    const w = fresh();
+    e._visuals.set(w, {rect:{...w.frame}});
+    w.actor.scale_x = 0.5;
+    let eased = null;
+    const realEase = w.actor.ease;
+    w.actor.ease = function (params) {eased = params; realEase.call(this, params);};
+    w.resizable = false;
+    await finishes(press('left'), 'rejected window');
+    assert(eased?.duration > 0 && w.actor.scale_x === 1 && !e._visuals.has(w), 'rejected window relaxes smoothly');
+}
+// 26d. Closing mid-animation (the actor still showing GNOME's close effect)
+// stops the animation and removes the snapshot at once.
+{
+    const w = fresh({frame:{x:0, y:0, width:500, height:800}});
+    halfState(w);
+    mock.widgets = [];
+    const before = mock.timelines.length;
+    const p = press('right');
+    for (let i = 0; i < 30 && !mock.widgets[0]?.clip; i++) await step(4);
+    assert(mock.widgets[0]?.clip, 'animation running');
+    w.emit('unmanaging');
+    await flush();
+    assert(mock.widgets.every(x => x.destroyed) && running(before).length === 0,
+        'closing: snapshot removed and animation stopped at once');
+    w.unmanaged = true;
+    await settle(300);
+    await p;
+    clean(w, 'closing mid-animation');
+}
+// 26e. A growing snapshot whose fade starts on the last frame finishes it
+// after the motion (MIN_FADE_MS) instead of vanishing.
+{
+    const w = fresh({frame:{x:100, y:100, width:300, height:300}, lag:300});
+    e._states.delete(w);
+    mock.widgets = [];
+    const before = mock.timelines.length;
+    const p = press('left');
+    for (let i = 0; i < 30 && !running(before).length; i++) await step(1);
+    assert(running(before).length === 1, 'growing animation started');
+    await step(400);
+    assert(mock.widgets.some(x => x.eased === 16), `late growing fade finishes over 16 ms (${mock.widgets.map(x => x.eased)})`);
+    await settle(800);
+    await p;
+    clean(w, 'late growing fade');
+}
+// 26f. From maximized, a restored floating size larger than the target but
+// not on its edges is not an answer to the request: no re-aim.
+{
+    const w = fresh({frame:{...AREAS[0]}, maximized:true, lag:30});
+    w.floating = {x:300, y:0, width:600, height:800};
+    w.floatingLag = 12;
+    const r = await watchMorph(w, 'left', {stepMs:2, steps:120});
+    assert(r.reaims.length === 0, `no re-aim at a size off the target's edges (${JSON.stringify(r.reaims)})`);
+    clean(w, 'off-edge floating');
+}
+// 26g. An app that draws the requested size and then a larger one Mutter
+// confirms: the re-aim waits for the new size from scratch, so the correction
+// is not mistaken for a follow-up frame.
+{
+    const w = fresh({frame:{...AREAS[0]}, lag:20});
+    fullState(w);
+    const p = press('left');
+    let corrected = false;
+    for (let i = 0; i < 100; i++) {
+        await step(2);
+        if (!corrected && w.drawn.width === 500) {
+            corrected = true;
+            w.frame = {...w.drawn, width:700};
+            w.queue.push({due:mock.clock+20000, r:{...w.drawn, width:700}});
+        }
+    }
+    await settle(600);
+    await p;
+    // Without the restart, the 700 px draw 20 ms after the 500 px one would
+    // be learned as a 20 ms follow-up.
+    const samples = e._followUps.samples.get(w) ?? [];
+    assert(corrected && samples.length === 1 && Math.abs(samples[0]-20) > 4,
+        `correction is not learned as a follow-up (samples ${samples})`);
+    clean(w, 'corrected size');
+}
+// 26h. A finished animation and a finished wait leave the snap's cancel
+// hooks (only the placement's own release hook remains).
+{
+    const w = fresh({frame:{x:0, y:0, width:500, height:800}});
+    halfState(w);
+    const p = press('right');
+    const op = e._operations.get(w);
+    await finishes(p, 'hooks snap');
+    await settle(300);
+    assert(op && op._hooks.size === 1, `animation and waits unregister their cancel hooks (${op?._hooks.size} left)`);
+    clean(w, 'hooks');
+
+    // The real confirmation wait (the tests otherwise use a stepped copy):
+    // two consecutive checks, then it unregisters its hook and its poll.
+    const v = fresh();
+    const hooks = new Set();
+    const fake = {cancelled:false, owner:e._dependency.stateObj._keybindingHandler,
+        onCancel(hook) {hooks.add(hook); return () => hooks.delete(hook);}};
+    const timers = new Set(mock.timers.keys());
+    let resolved = false;
+    const wait = Ext.prototype._waitForWindow.call(e, v, () => true, fake, 'test').then(() => {resolved = true;});
+    for (const [id, check] of [...mock.timers].filter(([id]) => !timers.has(id)))
+        if (!check()) mock.timers.delete(id);
+    await wait;
+    assert(resolved && hooks.size === 0 && [...mock.timers.keys()].every(id => timers.has(id)),
+        'real wait resolves, unregisters its cancel hook and stops polling');
+}
+// 26j. An animation for a snap that is already cancelled sets nothing up:
+// no handlers, no timeline (a stopped Clutter timeline can be restarted).
+{
+    const w = fresh();
+    const cover = new St.Widget({});
+    cover.width = 600;
+    cover.height = 400;
+    const effects = {snapshot:() => cover, backdrop:() => null, dropBackdrop() {}, dropCover() {}};
+    const op = {cancelled:true, superseded:false, onCancel(hook) {hook(); return () => {};}, cancel() {}};
+    const before = mock.timelines.length;
+    let failed = null;
+    await e._reveal(w, {...w.frame}, {x:0, y:0, width:500, height:800}, () => {}, op, effects).catch(error => {failed = error;});
+    assert(failed?.message === 'Placement cancelled' && running(before).length === 0 &&
+        w.actor._h.length === 0 && w._h.length === 0, 'cancelled snap: animation starts nothing');
+    e._visuals.reset(w, false);
+}
+// 26i. Disable mid-crossing: every timeline stopped (including follow-up
+// observations started by the cancelled animation), every timer removed
+// (including the delayed final crossing repaint), nothing left connected.
+{
+    // A finished crossing leaves one delayed repaint behind.
+    const w = fresh({frame:{x:500, y:0, width:500, height:800}, lag:15});
+    mock.neighbor = 1;
+    e._states.set(w, {layout:{x:'right', y:null}, monitor:0, rect:{...w.frame}, frame:{...w.frame}});
+    const timers = new Set(mock.timers.keys());
+    const p = press('right');
+    await settle(600);
+    await p;
+    const redraws = mock.redraws;
+    const added = [...mock.timers].filter(([id]) => !timers.has(id));
+    // A fired GLib source is gone.
+    added.forEach(([id, repaint]) => {repaint(); mock.timers.delete(id);});
+    assert(added.length === 1 && mock.redraws === redraws+1, 'crossing ends with one delayed repaint');
+
+    // A resizing crossing, so the cancelled animation starts a follow-up
+    // observation.
+    const v = fresh({frame:{x:400, y:0, width:600, height:800}, lag:15});
+    mock.neighbor = 1;
+    e._states.set(v, {layout:{x:'right', y:null}, monitor:0, rect:{...v.frame}, frame:{...v.frame}});
+    const before = mock.timelines.length;
+    mock.widgets = [];
+    const q = press('right').catch(() => {});
+    for (let i = 0; i < 40 && !(mock.widgets[0]?.clip && v.drawn.width === 500); i++) await step(4);
+    await step(4);
+    assert(v.drawn.width === 500 && running(before).length > 0, 'disabling mid-animation, after the app drew its size');
+    const pending = mock.timers.size;
+    e.disable();
+    await flush();
+    await q;
+    assert(running(0).length === 0, `disable stops every timeline (${running(0).length} running)`);
+    assert(pending > 0 && mock.timers.size === 0, `disable removes every timer (${mock.timers.size} of ${pending} left)`);
+    assert(v.actor._h.length === 0 && v._h.length === 0, 'disable leaves no handlers');
 }
 
 print(`PASS: ${count} lifecycle assertions`);

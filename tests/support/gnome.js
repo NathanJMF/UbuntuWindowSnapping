@@ -96,7 +96,8 @@ export const GLib = {
         return mock.clock;
     },
     timeout_add(_priority, _ms, callback) {
-        const id = mock.timers.size+100;
+        // Never reused, like GLib source ids.
+        const id = mock.nextTimer = (mock.nextTimer ?? 100)+1;
         mock.timers.set(id, callback);
         return id;
     },
@@ -114,7 +115,7 @@ export class Extension {
 
 export const Meta = {
     WindowClientType: {WAYLAND: 0, X11: 1},
-    WindowType: {NORMAL: 0, DESKTOP: 1, DOCK: 2},
+    WindowType: {NORMAL: 0, DESKTOP: 1, DOCK: 2, DIALOG: 3, MODAL_DIALOG: 4, UTILITY: 6, SPLASHSCREEN: 7},
     DisplayDirection: {LEFT: 0, RIGHT: 1, UP: 2, DOWN: 3},
     KeyBindingFlags: {IGNORE_AUTOREPEAT: 1},
     MaximizeFlags: {BOTH: 3},
@@ -148,7 +149,9 @@ export const St = {
             // The outline on screen: the clip in stage coordinates.
             (this.outline ??= []).push({x: this.x+x, y: this.y+y, width, height});
         }
+        // Instant, but records how long it was asked to take.
         ease(params) {
+            this.eased = params.duration;
             if ('opacity' in params)
                 this.opacity = params.opacity;
             params.onStopped?.();
@@ -170,8 +173,12 @@ class Timeline {
     get_elapsed_time() {
         return this.elapsed;
     }
+    // Like Clutter, a stopped timeline can be started again.
     start() {
         this.running = true;
+        this.stopped = false;
+        if (!mock.timelines.includes(this))
+            mock.timelines.push(this);
     }
     stop() {
         if (this.stopped)

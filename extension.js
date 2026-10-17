@@ -73,17 +73,19 @@ export default class KeyboardMonitorSnap extends Extension {
         this._grabId = global.display.connect('grab-op-begin', (_display, window) => {
             this._queued.delete(window);
             this._operations.get(window)?.cancel();
-            this._visuals.clear(window, false);
+            this._visuals.reset(window, false);
             this._states.delete(window);
         });
     }
 
     disable() {
         this._enabled = false;
-        this._followUps.stopAll();
         Main.layoutManager.disconnectObject(this);
+        // Cancelling can end an animation, which starts a follow-up
+        // observation: stop those afterwards.
         this._cancelOperations();
-        this._visuals.clearAll();
+        this._followUps.stopAll();
+        this._visuals.resetAll();
         for (const source of this._timers)
             GLib.Source.remove(source);
         this._timers.clear();
@@ -187,10 +189,17 @@ export default class KeyboardMonitorSnap extends Extension {
 
     // --- Key handling
 
-    // Only ordinary application windows snap: not the desktop-icons layer or
-    // anything else that opts out of the taskbar.
+    // Desktop, dock and splash windows never snap, nor does a fixed window
+    // that opts out of the taskbar (Ubuntu's desktop-icons layer: maximized,
+    // unmovable, skip-taskbar). Version 29 tried and waited 2 s for an
+    // unmaximize that never came. Dialogs, utility windows and movable
+    // skip-taskbar app windows still snap.
     _snappable(window) {
-        return window.get_window_type() === Meta.WindowType.NORMAL && !window.skip_taskbar;
+        const type = window.get_window_type();
+        if (type === Meta.WindowType.DESKTOP || type === Meta.WindowType.DOCK ||
+            type === Meta.WindowType.SPLASHSCREEN)
+            return false;
+        return !(window.skip_taskbar && !window.allows_move());
     }
 
     async _snap(direction, window = global.display.focus_window) {
@@ -217,7 +226,7 @@ export default class KeyboardMonitorSnap extends Extension {
         const maximized = window.maximizedHorizontally || window.maximizedVertically;
         if (!maximized && (!window.allows_move() || !window.allows_resize())) {
             this._debug.trace(window, 'rejected-capability', {directions});
-            this._visuals.clear(window, true);
+            this._visuals.reset(window, true);
             // An interrupted placement's intended layout is no longer valid.
             if (this._states.get(window)?.superseded)
                 this._states.delete(window);
@@ -277,7 +286,7 @@ export default class KeyboardMonitorSnap extends Extension {
             // No animation ran (real frame already on target) but an
             // interrupted motion left a transform: relax it.
             if (this._visuals.has(window) && !this._visuals.get(window).stopHold)
-                this._visuals.clear(window, true);
+                this._visuals.reset(window, true);
             this._debug.trace(window, 'after-request', {directions});
             if (this._debug.enabled)
                 this._later(250, () => this._debug.trace(window, 'after-settle', {directions}));
@@ -287,7 +296,7 @@ export default class KeyboardMonitorSnap extends Extension {
             } else {
                 this._states.delete(window);
                 this._queued.delete(window);
-                this._visuals.clear(window, true, actor);
+                this._visuals.reset(window, true, actor);
             }
             if (!operation.cancelled && !error.cancelled)
                 throw error;
@@ -325,8 +334,7 @@ export default class KeyboardMonitorSnap extends Extension {
         window.isTiled = false;
         window.tiledRect = null;
         const effects = createEffects(window, {animating: () => this._animationDuration() > 0,
-            visuals: this._visuals, followUps: this._followUps,
-            trace: (...args) => this._debug.trace(...args), debug: this._debug});
+            visuals: this._visuals, followUps: this._followUps, debug: this._debug});
         // A cancelled placement drops its snapshots and skips at once,
         // including a maximize cover the placement is waiting on.
         operation.onCancel(() => effects.release());

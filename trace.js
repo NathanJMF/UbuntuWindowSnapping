@@ -10,11 +10,13 @@ export class Debug {
         this._uuid = uuid;
         this._state = state;
         // Read on every animation frame: cached, refreshed when it changes.
-        this.enabled = settings.get_boolean('debug-logging');
+        // Connect before reading: GSettings only promises 'changed' for keys
+        // read while a handler is connected.
         this._settings = settings;
         settings.connectObject('changed::debug-logging', () => {
             this.enabled = settings.get_boolean('debug-logging');
         }, this);
+        this.enabled = settings.get_boolean('debug-logging');
     }
 
     dispose() {

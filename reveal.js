@@ -104,11 +104,14 @@ export function reveal({window, from, to, apply, snap, effects, visuals, followU
             } else if (!snap.superseded) {
                 // A superseded motion keeps its transform: the next one starts
                 // from what is on screen.
-                visuals.clear(window, false, actor);
+                visuals.reset(window, false, actor);
             }
             error ? reject(error) : resolve();
         };
         unregister = snap.onCancel(() => finish(new Error('Placement cancelled')));
+        // Already cancelled: finish has run; set nothing up.
+        if (finished)
+            return;
         scope.connect(timeline, 'new-frame', () => {
             const now = GLib.get_monotonic_time();
             repaint(false);
@@ -134,7 +137,8 @@ export function reveal({window, from, to, apply, snap, effects, visuals, followU
             } else {
                 placeWidget(cover, snapshotLayout(outline, natural, anchor, true));
             }
-            const fade = handover.update({elapsed, now, sized: sameSize(drawn, path.end), lastDamage});
+            const sized = sameSize(drawn, path.end);
+            const fade = handover.update({elapsed, now, sized, lastDamage});
             if (growing) {
                 // Live window underneath at its true size throughout; the
                 // snapshot on top fades out from the handover.
@@ -155,7 +159,7 @@ export function reveal({window, from, to, apply, snap, effects, visuals, followU
             if (debug.enabled) {
                 debug.frame({id: window.get_id(), elapsed,
                     curve: outline, end: path.end, drawn, mutter: rect(window.get_frame_rect()),
-                    sized: handover.sizedAt !== null, ready: handover.ready, fadeFrom: handover.fadeFrom,
+                    sized, ready: handover.ready, fadeFrom: handover.fadeFrom,
                     fadeMs: handover.fadeMs, sinceDamage: Math.round((now-lastDamage)/1000), cover: cover.opacity,
                     followUp, sinceSized: handover.sizedAt === null ? null : Math.round((now-handover.sizedAt)/1000),
                     growing, anchor, cost: GLib.get_monotonic_time()-now,
