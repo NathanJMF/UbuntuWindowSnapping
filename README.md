@@ -76,6 +76,8 @@ gjs -m tests/lifecycle.test.js
 
 The tests use mocked GNOME APIs. How smooth a snap actually looks has to be judged on screen after logging in, together with the debug logs.
 
+`python3 -I tests/mutations.py` checks the tests themselves: it breaks each guarded behaviour in turn (restoring the sources afterwards) and reports any that no test notices. `tools/analyze-logs.py` summarizes a session's debug logs (handover timing, fades, learned follow-ups, maximize covers, frame gaps, and the frame handler's cost in microseconds) for comparing versions.
+
 ## Disable or roll back
 
 ```bash

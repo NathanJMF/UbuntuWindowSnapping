@@ -453,9 +453,9 @@ export default class KeyboardMonitorSnap extends Extension {
             };
             operation.cancelAnimation = () => finish(new Error('Placement cancelled'));
             timeline.connectObject('new-frame', () => {
+                const now = GLib.get_monotonic_time();
                 this._repaintCrossing(operation);
                 const elapsed = timeline.get_elapsed_time();
-                const now = GLib.get_monotonic_time();
                 const drawn = this._drawnFrame(window, actor).frame;
                 const late = elapsed >= readyLimit*duration;
                 // Re-aim at the size the app really takes, once it has drawn a
@@ -523,6 +523,7 @@ export default class KeyboardMonitorSnap extends Extension {
                         curve, end, drawn, mutter:rect(window.get_frame_rect()), sized, ready, fadeFrom,
                         sinceDamage:Math.round((now-lastDamage)/1000), cover:cover.opacity, fadeMs, followUp,
                         sinceSized:sizedAt === null ? null : Math.round((now-sizedAt)/1000), growing, anchor,
+                        cost:GLib.get_monotonic_time()-now,
                         scale:[actor.scale_x, actor.scale_y].map(v => Math.round(v*1000)/1000)})}`);
             }, 'completed', () => finish(), this);
             actor.connectObject('destroy', () => operation.cancel(),
