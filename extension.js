@@ -93,6 +93,7 @@ export default class KeyboardMonitorSnap extends Extension {
         if (this._grabId)
             global.display.disconnect(this._grabId);
         this._grabId = null;
+        this._debug.dispose();
         try {
             this._releaseBindings();
         } finally {

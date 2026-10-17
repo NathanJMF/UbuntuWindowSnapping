@@ -59,9 +59,9 @@ export class Visuals extends Map {
     }
 
     // Show the live window unscaled, its drawn frame aligned to `outline` at
-    // the anchor, cropped to `outline`.
-    showRevealed(window, actor, outline, anchor) {
-        const {frame} = drawnFrame(window, actor);
+    // the anchor, cropped to `outline`. `frame` is the drawn frame if the
+    // caller has just read it (saves Mutter calls on every animation frame).
+    showRevealed(window, actor, outline, anchor, frame = drawnFrame(window, actor).frame) {
         const layout = revealedWindowLayout(frame, {x: actor.x, y: actor.y}, outline, anchor);
         actor.set_pivot_point(0, 0);
         actor.scale_x = 1;

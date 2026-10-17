@@ -138,14 +138,14 @@ export function reveal({window, from, to, apply, snap, effects, visuals, followU
             if (growing) {
                 // Live window underneath at its true size throughout; the
                 // snapshot on top fades out from the handover.
-                visuals.showRevealed(window, actor, outline, anchor);
+                visuals.showRevealed(window, actor, outline, anchor, drawn);
                 if (fade !== null)
                     cover.opacity = Math.round(255*(1-fade));
             } else if (fade !== null) {
                 // The live window fades in on top, unscaled and cropped; the
                 // snapshot underneath stays until the motion ends.
                 actor.opacity = Math.round(255*fade);
-                visuals.showRevealed(window, actor, outline, anchor);
+                visuals.showRevealed(window, actor, outline, anchor, drawn);
             } else {
                 // Still covered: remember what is on screen for interruptions.
                 const visual = visuals.get(window) ?? {};

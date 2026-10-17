@@ -7,13 +7,18 @@ export class Debug {
     // settings: this extension's settings. state(window): the window's
     // tracked keyboard state, for context in traces.
     constructor(settings, uuid, state) {
-        this._settings = settings;
         this._uuid = uuid;
         this._state = state;
+        // Read on every animation frame: cached, refreshed when it changes.
+        this.enabled = settings.get_boolean('debug-logging');
+        this._settings = settings;
+        settings.connectObject('changed::debug-logging', () => {
+            this.enabled = settings.get_boolean('debug-logging');
+        }, this);
     }
 
-    get enabled() {
-        return this._settings.get_boolean('debug-logging');
+    dispose() {
+        this._settings.disconnectObject(this);
     }
 
     trace(window, phase, extra = {}) {

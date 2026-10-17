@@ -5,6 +5,7 @@ import {followUpDelay, learnFollowUp, FOLLOW_SAMPLES} from '../follow-up.js';
 import {contentAnchor, snapshotLayout, revealedWindowLayout} from '../layers.js';
 import {EasedPath, sameSize} from '../geometry.js';
 import {Scope, Snap} from '../scope.js';
+import {Debug} from '../trace.js';
 
 let count = 0;
 function assert(value, message) {
@@ -169,6 +170,22 @@ function startOf(handover, {sizedAt = null, drawsAt = []} = {}) {
     cancelled.cancel();
     cancelled.supersede();
     assert(!cancelled.superseded, 'an already cancelled snap is not marked superseded');
+}
+
+// --- Debug flag: cached, follows the setting, stops listening on dispose
+{
+    const settings = {value: false, handler: null,
+        get_boolean() {return this.value;},
+        connectObject(signal, handler) {if (signal === 'changed::debug-logging') this.handler = handler;},
+        disconnectObject() {this.handler = null;}};
+    const debug = new Debug(settings, 'test', () => null);
+    assert(debug.enabled === false, 'starts from the setting');
+    settings.value = true;
+    assert(debug.enabled === false, 'cached between changes');
+    settings.handler();
+    assert(debug.enabled === true, 'follows a change of the setting');
+    debug.dispose();
+    assert(settings.handler === null, 'stops listening when disposed');
 }
 
 print(`PASS: ${count} unit assertions`);

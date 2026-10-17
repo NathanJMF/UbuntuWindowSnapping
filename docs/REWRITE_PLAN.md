@@ -2,6 +2,20 @@
 
 Branch: `rewrite`, from `main` at version 29 (`known-good-v29`). Nothing on this branch is installed until approved. Installing from it would also turn debug logging on.
 
+## Status (2026-10-17)
+
+| Phase | State |
+|---|---|
+| 0 Baseline | Done: `tests/mutations.py`, `tools/analyze-logs.py`, frame-handler cost in `FRAME` logs. Version 29's frame cost has not been measured, because that needs an instrumented install. |
+| 1 Test infrastructure | Done: `tests/support/gnome.js` (one mock world) and `tests/support/load.js` (loads every module with mocked GNOME imports). |
+| 2 Pure modules | Done: `geometry.js`, `handover.js`, `follow-up.js`, `layers.js`, plus a `units` suite. |
+| 3 Lifetimes | Done: `scope.js` (`Scope`, `Snap`). |
+| 4 Split | Done: `reveal.js`, `visuals.js`, `effects.js`, `follow-up-tracker.js`, `bindings.js`, `trace.js`; `extension.js` went from 1162 to 437 lines. Also fixed: Super+Arrow on the desktop-icons layer timed out after 2 s in version 29. |
+| 5 Performance | Partly done: debug flag cached; one geometry read per frame. Deferred: signal-driven waits (gain at most one frame of confirmation latency; real Chromium ordering risk) and targeted crossing repaints (the ghosts turned out to be a layering gap fixed in version 28, so the repaint may not be needed at all). Both should be decided with live measurements. |
+| 6 Review and live check | Pending; installing awaits approval. |
+
+All suites pass (649+ checks) and the mutation sweep guards every listed behaviour, with one known, documented survivor.
+
 ## Goal
 
 Make the extension easier to understand and cheaper per frame **without changing anything you can see**. Version 29 is the reference: every phase must keep its behaviour, its 591 automated checks, and its mutation-sweep results. The live comparison against version 29's logged metrics happens at the end.
