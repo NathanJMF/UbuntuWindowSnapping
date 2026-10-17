@@ -1,6 +1,6 @@
 # Rewrite plan: simpler and cheaper, same behaviour
 
-Branch: `rewrite`, from `main` at version 29 (`known-good-v29`). Nothing on this branch is installed until approved. Installing from it would also turn debug logging on.
+Done: merged into `main` as version 30 (`known-good-v30`), from version 29 (`known-good-v29`).
 
 ## Status (2026-10-17)
 
@@ -12,9 +12,13 @@ Branch: `rewrite`, from `main` at version 29 (`known-good-v29`). Nothing on this
 | 3 Lifetimes | Done: `scope.js` (`Scope`, `Snap`). |
 | 4 Split | Done: `reveal.js`, `visuals.js`, `effects.js`, `follow-up-tracker.js`, `bindings.js`, `trace.js`; `extension.js` went from 1162 to 437 lines. Also fixed: Super+Arrow on the desktop-icons layer timed out after 2 s in version 29. |
 | 5 Performance | Partly done: debug flag cached; one geometry read per frame. Deferred: signal-driven waits (gain at most one frame of confirmation latency; real Chromium ordering risk) and targeted crossing repaints (the ghosts turned out to be a layering gap fixed in version 28, so the repaint may not be needed at all). Both should be decided with live measurements. |
-| 6 Review and live check | Review done; findings fixed (below). The live check awaits approval. |
+| 6 Review and live check | Done: review findings fixed (below); live logs match version 29 (below); merge approved. |
 
 All suites pass (754 checks) and the mutation sweep guards every listed behaviour (46), with one known, documented survivor.
+
+### Live check (2026-10-17)
+
+About 140 snaps in Chromium and Claude desktop, compared with version 29's logs from the same day (2,200 snaps): same motion lengths and fade lengths, follow-ups learned to the same values (Chromium 77 ms, Claude 70 ms), maximize covers held for the same median (39 ms), animation frames every 2 ms with a smaller worst gap (25 ms vs 120 ms), and no errors or timeouts. The frame handler costs about 50 µs per frame (p90 under 70 µs). Visual review found no difference.
 
 ### Independent review findings (phase 6), all addressed
 
