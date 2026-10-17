@@ -4,11 +4,20 @@ A GNOME Shell 50 extension for Ubuntu (Wayland) that replaces Super+Arrow with h
 
 ## Files
 
+- `extension.js`: wiring: shortcuts and the Tiling Assistant dependency, per-window key handling (including folding quick presses), and each placement with its confirmation waits and Tiling Assistant restore metadata. It never patches mouse handlers or Tiling Assistant.
 - `engine.js`: the snapping rules as pure state transitions and work-area geometry.
-- `placement.js`: one placement: unmaximize, animate, set the final geometry, confirm it, maximize. Also pure helpers (curves, alignment, durations).
-- `extension.js`: shortcuts, per-window sequences, the animation, native-effect handling, and Tiling Assistant restore metadata. It never patches mouse handlers or Tiling Assistant.
+- `placement.js`: one placement: unmaximize, animate, set the final geometry, confirm it, maximize.
+- `reveal.js`: the animation.
+- `handover.js`, `layers.js`, `geometry.js`, `follow-up.js`: pure logic for the animation: when the live window takes over, where each layer goes, rectangles, easing and the eased path, and follow-up learning.
+- `visuals.js`: what each window actor shows (transform, clip) and the post-motion hold.
+- `effects.js`: snapshots, the backdrop, skipping GNOME's own size-change effects, and the maximize cover.
+- `follow-up-tracker.js`: per-window follow-up learning and observation.
+- `bindings.js`: taking and restoring the Super+Arrow shortcuts.
+- `scope.js`: `Scope` (releases connections, timelines and timers once) and `Snap` (one placement's cancellation).
+- `trace.js`: debug logging.
 - `schemas/`: the four shortcuts, the saved previous bindings, and the debug-logging flag.
-- `tests/`: `rules` (snapping rules), `adapter` (the real extension against mocked GNOME APIs), `placement` (placement ordering against a delayed client), and `lifecycle` (timing-sensitive animation behaviour with frame-stepped timelines, tracked signals, cancellable waits, and clients that lag, re-lay out, have minimum sizes, or redraw constantly).
+- `tests/`: `rules` (snapping rules), `units` (the pure modules and lifetimes), `adapter` (the real extension against mocked GNOME APIs), `placement` (placement ordering against a delayed client) and `lifecycle` (timing-sensitive animation behaviour), all on one mock GNOME world in `tests/support/`. Also `mutations.py`, which checks the tests themselves.
+- `tools/analyze-logs.py`: summarizes debug logs for comparing versions.
 - `install.sh` / `uninstall.sh`.
 
 ## Install or update
@@ -69,6 +78,7 @@ Expected: Enabled Yes, State ACTIVE. Then check by hand:
 
 ```bash
 gjs -m tests/rules.test.js
+gjs -m tests/units.test.js
 gjs -m tests/adapter.test.js
 gjs -m tests/placement.test.js
 gjs -m tests/lifecycle.test.js

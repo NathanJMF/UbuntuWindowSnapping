@@ -14,7 +14,7 @@ function window(maximized=false){const w={monitor:0,maximizedHorizontally:maximi
   connectObject(){},disconnectObject(){},paint_to_content:()=>({}),set_pivot_point(){},remove_all_transitions(){},set_clip(){},remove_clip(){},
   ease(p){for(const k of ['scale_x','scale_y','translation_x','translation_y','opacity'])if(k in p)this[k]=p[k];p.onStopped?.();}},
  get_buffer_rect(){return {...this.frame};},
- get_compositor_private(){return this.actor;},connectObject(){},disconnectObject(){},
+ get_compositor_private(){return this.actor;},connectObject(){},disconnectObject(){},get_window_type(){return 0;},skip_taskbar:false,get_client_type(){return 0;},
  get_id(){return 1;},get_frame_rect(){return {...this.frame};},
  allows_move(){return !this.maximizedHorizontally;},allows_resize(){return !this.maximizedHorizontally;},
  unminimize(){},unmaximize(){this.maximizedHorizontally=false;this.maximizedVertically=false;},

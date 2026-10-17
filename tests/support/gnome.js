@@ -114,6 +114,7 @@ export class Extension {
 
 export const Meta = {
     WindowClientType: {WAYLAND: 0, X11: 1},
+    WindowType: {NORMAL: 0, DESKTOP: 1, DOCK: 2},
     DisplayDirection: {LEFT: 0, RIGHT: 1, UP: 2, DOWN: 3},
     KeyBindingFlags: {IGNORE_AUTOREPEAT: 1},
     MaximizeFlags: {BOTH: 3},

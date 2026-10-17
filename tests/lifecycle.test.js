@@ -48,6 +48,7 @@ function makeWindow({frame = {x:100, y:100, width:600, height:400}, lag = 40, ma
     };
     Object.assign(w, {
         get_compositor_private() {return this.unmanaged ? null : this.actor;}, get_id:() => 1,
+        get_window_type() {return this.windowType ?? 0;}, skip_taskbar:false, get_client_type:() => 0, get_wm_class:() => 'test',
         get_frame_rect() {return {...this.frame};}, get_buffer_rect() {return {...this.frame};},
         allows_move() {return true;}, allows_resize() {return this.resizable;}, unminimize() {},
         get_monitor() {
@@ -495,12 +496,12 @@ for (const signal of [true, false]) {
     w.drawn = {...w.frame};
     e._states.set(w, {layout:{x:'left', y:null}, monitor:0, rect:{x:0, y:0, width:500, height:800}, frame:{x:0, y:0, width:500, height:800}});
     e._visuals.set(w, {rect:{x:0, y:0, width:520, height:800}});
-    e._hold(w, w.actor, {x:0, y:0, width:500, height:800}, {x:0, y:0});
+    e._visuals.hold(w, w.actor, {x:0, y:0, width:500, height:800}, {x:0, y:0});
     mock.halfEase = true;
     w.actor.scale_x = 1.04;
-    e._clearVisual(w, true, w.actor);
+    e._visuals.clear(w, true, w.actor);
     mock.halfEase = false;
-    const displayed = e._displayedRect(w);
+    const displayed = e._visuals.displayedRect(w);
     assert(displayed && displayed.width === 510, 'relax half way is drawn 510 px wide');
     const froms = [];
     const real = e._reveal.bind(e);
@@ -543,10 +544,10 @@ const halfState = w => e._states.set(w, {layout:{x:'left', y:null}, monitor:0,
 async function watchMorph(w, dir, {stepMs = 4, steps = 80} = {}) {
     mock.widgets = [];
     const result = {shownAt:null, content:null, reaims:[], holds:[], goneAt:null, landedAt:null};
-    const realTrace = e._trace.bind(e), realHold = e._hold.bind(e);
-    e._trace = (w_, phase, extra) => {if (phase === 'reaim') result.reaims.push(extra); realTrace(w_, phase, extra);};
+    const realTrace = e._debug.trace.bind(e._debug), realHold = e._visuals.hold.bind(e._visuals);
+    e._debug.trace = (w_, phase, extra) => {if (phase === 'reaim') result.reaims.push(extra); realTrace(w_, phase, extra);};
     // The hold starts on the motion's last frame: that is when it lands.
-    e._hold = (w_, actor, target, anchor) => {
+    e._visuals.hold = (w_, actor, target, anchor) => {
         result.holds.push({...target});
         result.landedAt ??= (mock.clock-start)/1000;
         realHold(w_, actor, target, anchor);
@@ -571,7 +572,7 @@ async function watchMorph(w, dir, {stepMs = 4, steps = 80} = {}) {
     }
     await settle(800);
     await p;
-    e._trace = realTrace; e._hold = realHold;
+    e._debug.trace = realTrace; e._visuals.hold = realHold;
     result.moves = mock.widgets[0]?.outline ?? [];
     return result;
 }
@@ -685,8 +686,8 @@ for (const style of ['reveal']) {
     e._states.set(w, {layout:{x:null, y:'up'}, monitor:0, rect:{x:0, y:0, width:1000, height:400},
         frame:{x:0, y:0, width:1000, height:400}});
     const traces = [];
-    const realTrace = e._trace.bind(e);
-    e._trace = (w_, phase, extra) => {if (phase === 'state-cover') traces.push(extra); realTrace(w_, phase, extra);};
+    const realTrace = e._debug.trace.bind(e._debug);
+    e._debug.trace = (w_, phase, extra) => {if (phase === 'state-cover') traces.push(extra); realTrace(w_, phase, extra);};
     mock.widgets = [];
     let offsetVisible = 0, offsetFrames = 0;
     const p = press('up');
@@ -699,7 +700,7 @@ for (const style of ['reveal']) {
     }
     await settle(600);
     await p;
-    e._trace = realTrace;
+    e._debug.trace = realTrace;
     w.maximizeGlitch = 0;
     assert(w.maximizedHorizontally, `${style}: top half -> Up -> full, maximized`);
     assert(offsetFrames > 0 && offsetVisible === 0, `${style}: the shifted first maximized frame is never visible (${offsetVisible}/${offsetFrames})`);
@@ -760,7 +761,7 @@ for (const [opts, label] of [[{quietMaximize:true}, 'no redraw'], [{lateMaximize
         await settle(200);
     }
     mock.slowDown = 1;
-    const learned = e._followUp.get(w);
+    const learned = e._followUps.learned.get(w);
     assert(Math.abs(learned-43) <= 4, `follow-up delay learned (${learned} ms)`);
     assert(runs[0].content === 'stale', 'first snap: not learned yet, handed over before the follow-up');
     assert(runs.slice(1).every(r => r.content === 'laid-out'),
@@ -773,13 +774,13 @@ for (const [opts, label] of [[{quietMaximize:true}, 'no redraw'], [{lateMaximize
     // One snap without a follow-up (left half -> Down -> bottom-left quarter,
     // no maximize to cut the observation short) barely moves the estimate,
     // and one unusually slow follow-up does not drag it up either.
-    const before = e._followUp.get(w);
+    const before = e._followUps.learned.get(w);
     await watchMorph(w, 'down', {stepMs:2, steps:140});
-    const after = e._followUp.get(w);
-    assert(after >= before*0.9 && e._followSamples.get(w).at(-1) === 0, `a missing follow-up barely moves it (${before} -> ${after})`);
-    e._followSamples.set(w, [44, 43, 45, 44, 42, 46, 43, 44, 45, 43]);
-    e._learnFollowUp(w, mock.clock*1 - 70000, [mock.clock - 70000 + 76000], {width:500, height:800}, {width:1000, height:800}, true);
-    assert(e._followUp.get(w) <= 46, `one slow follow-up does not drag the estimate up (${e._followUp.get(w)})`);
+    const after = e._followUps.learned.get(w);
+    assert(after >= before*0.9 && e._followUps.samples.get(w).at(-1) === 0, `a missing follow-up barely moves it (${before} -> ${after})`);
+    e._followUps.samples.set(w, [44, 43, 45, 44, 42, 46, 43, 44, 45, 43]);
+    e._followUps.learn(w, mock.clock*1 - 70000, [mock.clock - 70000 + 76000], {width:500, height:800}, {width:1000, height:800}, true);
+    assert(e._followUps.learned.get(w) <= 46, `one slow follow-up does not drag the estimate up (${e._followUps.learned.get(w)})`);
     clean(w, 'follow-up decay');
 }
 
@@ -790,7 +791,7 @@ for (const [opts, label] of [[{quietMaximize:true}, 'no redraw'], [{lateMaximize
     mock.slowDown = 1;
     const w = fresh({frame:{x:0, y:0, width:500, height:800}, lag:15});
     w.relayout = 43;
-    e._followUp.set(w, 43);
+    e._followUps.learned.set(w, 43);
     halfState(w);
     const r = await watchMorph(w, 'right', {stepMs:2, steps:140});
     mock.slowDown = 1;
@@ -809,7 +810,7 @@ for (const [opts, label] of [[{quietMaximize:true}, 'no redraw'], [{lateMaximize
         runs.push(await watchMorph(w, dir, {stepMs:2, steps:120}));
         await settle(200);
     }
-    assert((e._followUp.get(w) ?? 0) < 10, `no follow-up learned (${e._followUp.get(w)})`);
+    assert((e._followUps.learned.get(w) ?? 0) < 10, `no follow-up learned (${e._followUps.learned.get(w)})`);
     assert(runs.every(r => r.afterSized >= 24 && r.afterSized <= 30), `quick handover kept (${runs.map(r => r.afterSized)})`);
     clean(w, 'no follow-up');
 }
@@ -827,7 +828,7 @@ for (const [opts, label] of [[{quietMaximize:true}, 'no redraw'], [{lateMaximize
         await settle(200);
     }
     mock.slowDown = 1;
-    assert(e._followUp.get(w) >= 66, `70 ms follow-up learned (${e._followUp.get(w)})`);
+    assert(e._followUps.learned.get(w) >= 66, `70 ms follow-up learned (${e._followUps.learned.get(w)})`);
     assert(runs.slice(1).every(r => r.afterSized >= 66 && r.afterSized <= 72),
         `handover capped at 60 + 8 ms after the first frame (${runs.map(r => r.afterSized)})`);
     w.relayout = 0;
@@ -867,10 +868,10 @@ async function watchReveal(w, dir, steps = 120) {
     // The motion's end hands over to the hold, which may scale the window:
     // no reveal clip may be left at that point.
     const clipsAtHold = [];
-    const realHold = e._hold.bind(e);
-    e._hold = (w_, actor, target, shape) => {clipsAtHold.push(actor.clip); realHold(w_, actor, target, shape);};
+    const realHold = e._visuals.hold.bind(e._visuals);
+    e._visuals.hold = (w_, actor, target, shape) => {clipsAtHold.push(actor.clip); realHold(w_, actor, target, shape);};
     const f = await watchReveal(w, 'left');
-    e._hold = realHold;
+    e._visuals.hold = realHold;
     assert(clipsAtHold.length === 1 && clipsAtHold[0] === null, 'no clip left when the motion ends');
     assert(f.length > 20 && f.every(x => x.snap.width === 1000 && x.snap.height === 800),
         'shrinking: snapshot never scaled, only cropped');
@@ -983,6 +984,23 @@ for (const style of ['reveal']) {
     assert(mock.redraws === 0, `${style}: no extra repaints within one monitor`);
     clean(v, `${style} same-monitor`);
 }
+// 22r. The desktop-icons layer (a maximized, unmovable window that skips
+// the taskbar) and other non-application windows are never snapped: no
+// snapshot, no request, no 2 s wait for an unmaximize that never comes.
+for (const [label, opts] of [['skip-taskbar', {skip_taskbar: true}], ['desktop type', {windowType: 1}]]) {
+    const w = fresh({frame:{x:0, y:0, width:1000, height:800}, maximized:true});
+    Object.assign(w, opts);
+    w.resizable = false;
+    mock.widgets = [];
+    let failed = null;
+    const p = e._snap('left').catch(error => {failed = error;});
+    await settle(100);
+    await p;
+    assert(!failed && w.requests.length === 0 && mock.widgets.length === 0 && w.maximizedHorizontally,
+        `${label}: window left alone`);
+    clean(w, `${label} ignored`);
+}
+
 // 23. Closing mid-animation removes the snapshot and stops driving the window.
 {
     const w = fresh({frame:{x:0, y:0, width:500, height:800}});
