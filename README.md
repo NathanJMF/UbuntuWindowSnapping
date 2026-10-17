@@ -363,3 +363,13 @@ GSETTINGS_SCHEMA_DIR="$PWD/schemas" gsettings set org.gnome.shell.extensions.key
 ```
 
 Validation: 684 checks (121 rules, 77 adapter, 79 delayed placement, 407 lifecycle). Reveal and the estimator were mutation-checked: squished snapshot, scaled or uncropped live window, clip left after the motion, snapshot above the window, slowest-sample estimate.
+
+## Growing reveal moves (version 26, experiment/animations branch)
+
+In reveal style, shrinking moves looked right but growing ones still stretched and popped. When a window grows, nothing larger than the old snapshot exists until the app draws at the new size (~18 ms for Claude), and ease-out covers about 45% of the distance by then. Growing reveal moves now:
+
+- **Start gently** with ease-in-out cubic, so only about 2–3% of the growth happens before the app's first frame. In tests, the stretch before the app draws fell from 44% to at most 6%. Shrinking moves keep ease-out.
+- **Show the live window underneath** at its true size, cropped to the outline, from the start, so newly revealed area shows the app's real content.
+- **Keep the snapshot on top at its own size**, stretched only while the app has drawn nothing bigger, then fade it out at the learned handover. The switch is a dissolve between two crisp layouts, as when shrinking.
+
+Validation: 688 checks (121 rules, 77 adapter, 80 delayed placement, 410 lifecycle), with each growing behaviour mutation-checked.

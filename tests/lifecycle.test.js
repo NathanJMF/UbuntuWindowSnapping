@@ -1068,7 +1068,8 @@ async function watchReveal(w, dir, steps = 120) {
         const snap = mock.widgets[0];
         if (!snap || snap.destroyed) continue;
         const a = w.actor;
-        frames.push({snap:{width:snap.width, height:snap.height, clip:snap.clip && {...snap.clip}, below:snap.below},
+        frames.push({snap:{width:snap.width, height:snap.height, clip:snap.clip && {...snap.clip}, below:snap.below,
+                opacity:snap.opacity}, drawnWidth:w.drawn.width, content:w.content,
             visible:a.opacity > 0, scale:[a.scale_x, a.scale_y], clip:a.clip && {...a.clip},
             left:w.drawn.x+a.translation_x, curve:e._visuals.get(w)?.rect && {...e._visuals.get(w).rect}});
     }
@@ -1105,17 +1106,23 @@ async function watchReveal(w, dir, steps = 120) {
     clean(w, 'reveal shrinking');
 }
 
-// 22n. Growing (left half -> full): before the handover the snapshot may
-// stretch to fill the outline (nothing bigger exists yet); after it the
-// live window is unscaled and cropped. Nothing is ever scaled down.
+// 22n. Growing (left half -> full): a gentle start, the live window
+// underneath at its true size (cropped) from the start, and the snapshot
+// on top at its own size. It stretches only before the app has drawn
+// anything bigger, and only slightly thanks to the gentle start.
 {
-    const w = fresh({frame:{x:0, y:0, width:500, height:800}, lag:20});
+    const w = fresh({frame:{x:0, y:0, width:500, height:800}, lag:18});
     halfState(w);
     const f = await watchReveal(w, 'right');
-    assert(f.every(x => x.snap.width >= 500 && x.snap.height >= 800), 'growing: snapshot never scaled down');
-    const shown = f.filter(x => x.visible);
-    assert(shown.length > 5 && shown.every(x => x.scale[0] === 1 && x.clip.width === x.curve.width),
-        'growing: live window unscaled, cropped to the outline');
+    const moving = f.filter(x => x.snap.clip);
+    assert(moving.length > 20 && moving.every(x => !x.snap.below), 'growing: snapshot on top of the live window');
+    assert(moving.every(x => x.visible && x.scale[0] === 1 && x.scale[1] === 1 && x.clip?.width === x.curve.width),
+        'growing: live window visible underneath, unscaled, cropped to the outline');
+    const before = moving.filter(x => x.drawnWidth <= 503), after = moving.filter(x => x.drawnWidth > 503);
+    const stretch = Math.max(...before.map(x => x.snap.width/500));
+    assert(before.length > 0 && stretch <= 1.06, `before the app draws bigger, at most a slight stretch (${stretch.toFixed(3)})`);
+    assert(after.length > 10 && after.every(x => x.snap.width === 500), 'once the app has drawn bigger, the snapshot is never stretched');
+    assert(after.some(x => x.snap.opacity < 255) && moving.at(-1).snap.opacity < 255, 'snapshot fades out at the handover');
     assert(mock.widgets.every(x => x.destroyed) && w.maximizedHorizontally, 'growing: ends full, snapshots removed');
     clean(w, 'reveal growing');
 }

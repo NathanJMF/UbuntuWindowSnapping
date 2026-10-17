@@ -20,6 +20,12 @@ export function easeOutCubic(t) {
     const x = Math.min(1, Math.max(0, t));
     return 1 - (1-x)**3;
 }
+// Gentle-start curve for growing reveal moves: little happens in the first
+// frames, before the app has drawn anything at the new size.
+export function easeInOutCubic(t) {
+    const x = Math.min(1, Math.max(0, t));
+    return x < 0.5 ? 4*x**3 : 1 - (-2*x+2)**3/2;
+}
 // Per axis, which point of the window stays put: 0 = start edge, 1 = end
 // edge, 0.5 = centre (both edges move, e.g. across monitors).
 export function anchorFor(from, to) {

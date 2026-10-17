@@ -1,4 +1,4 @@
-import {placeWindow,sameFrame,interpolateRect,travelDuration,visualTransform,easeOutCubic,anchorFor,growthFor} from '../placement.js';
+import {placeWindow,sameFrame,interpolateRect,travelDuration,visualTransform,easeOutCubic,easeInOutCubic,anchorFor,growthFor} from '../placement.js';
 let assertions=0;
 function assert(value,message){assertions++;if(!value)throw new Error(message);}
 function environment({monitor=2,minWidth=0,cancelAt=Infinity,resizeDelay=4,geometryAssignsMonitor=false}={}) {
@@ -125,6 +125,7 @@ for (const [source,dest,target] of [
 }
 {
  assert(easeOutCubic(0)===0&&easeOutCubic(1)===1&&easeOutCubic(2)===1&&Math.abs(easeOutCubic(0.5)-0.875)<1e-9,'ease-out cubic curve');
+ assert(easeInOutCubic(0)===0&&easeInOutCubic(1)===1&&Math.abs(easeInOutCubic(0.5)-0.5)<1e-9&&easeInOutCubic(0.18)<0.03,'ease-in-out cubic: gentle start (under 3% at 18%)');
  const half={x:0,y:0,width:1280,height:1355};
  const a1=anchorFor(half,{x:0,y:0,width:2560,height:1355});
  assert(a1.x===0&&a1.y===0,'left edge fixed: anchor left');
