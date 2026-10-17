@@ -310,3 +310,13 @@ Validation: 516 checks (121 rules, 77 adapter, 79 delayed placement, 239 lifecyc
 A faint, faded-looking frame showed at the end of some morphs. In version 20's logs (67 Claude snaps), waiting for content to settle put the handover a median third of the way into the motion (90th percentile 57%). The fixed 70 ms crossfade then ran past the landing in 25 snaps, leaving the old snapshot half-transparent over the landed window for 7–37 ms. The fade now ends by 90% of the motion: up to 70 ms if there is room, shorter after a late handover, never under 16 ms.
 
 Validation: 518 checks (121 rules, 77 adapter, 79 delayed placement, 241 lifecycle); a late-handover test asserts the snapshot is gone a few frames before the window lands.
+
+## Tunable crossfade (version 22, experiment/animations branch)
+
+Version 21's logs (80 morphs) show the snapshot always gone before landing and the live window never shown before the app drew its final size. The only blended period is the mid-motion crossfade, about 70 ms in which the old snapshot and the new layout overlap, which can read as a faded flash. Its maximum length is now the live `morph-fade` setting (milliseconds, default 70; 0 swaps in one frame at the handover). It still ends by 90% of the motion.
+
+```bash
+GSETTINGS_SCHEMA_DIR="$PWD/schemas" gsettings set org.gnome.shell.extensions.keyboard-monitor-snap morph-fade 0
+```
+
+Validation: 530 checks (121 rules, 77 adapter, 79 delayed placement, 253 lifecycle).

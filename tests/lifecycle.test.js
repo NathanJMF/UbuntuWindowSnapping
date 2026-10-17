@@ -9,7 +9,7 @@ import {anchorFor} from '../placement.js';
 const root = Gio.File.new_for_uri(import.meta.url).get_parent().get_parent().get_path();
 const text = new TextDecoder().decode(GLib.file_get_contents(`${root}/extension.js`)[1]);
 const setup = `
-export const mock = {widgets:[], later:[], missingKeys:new Set(), missingSchemas:new Set(), lateUnmaximize:0, halfEase:false, lateSizeChange:false, monitors:2, invalidMonitorCalls:[], clock:0, ints:{'animation-duration':120,'max-stretch':3}, timelines:[], focus:null,
+export const mock = {widgets:[], later:[], missingKeys:new Set(), missingSchemas:new Set(), lateUnmaximize:0, halfEase:false, lateSizeChange:false, monitors:2, invalidMonitorCalls:[], clock:0, ints:{'animation-duration':120,'max-stretch':3,'morph-fade':70}, timelines:[], focus:null,
  neighbor:-1, bindings:new Map(), values:new Map(), defaults:new Map(), resets:[], handler:{}, grab:null,
  timers:new Map(), pending:[], nativeEffects:0, skippedEffects:0};
 export function signals(o) {
@@ -835,6 +835,19 @@ const maxJump = moves => {
     assert(r.goneAt !== null && r.goneAt <= r.landedAt-14,
         `video: snapshot gone before the window lands (gone ${r.goneAt} ms, landed ${r.landedAt} ms)`);
     clean(w, 'morph video');
+}
+
+// 22f. morph-fade 0: the snapshot is swapped for the live window in one
+// frame at the handover; 30: the fade lasts about 30 ms.
+for (const [fade, label] of [[0, 'instant swap'], [30, '30 ms fade']]) {
+    mock.ints['morph-fade'] = fade;
+    const w = fresh({frame:{...AREAS[0]}, lag:20});
+    fullState(w);
+    const r = await watchMorph(w, 'left', {stepMs:2, steps:120});
+    mock.ints['morph-fade'] = 70;
+    const span = r.goneAt-r.shownAt;
+    assert(fade === 0 ? span === 0 : span >= 26 && span <= 34, `${label}: snapshot gone ${span} ms after the handover`);
+    clean(w, `morph ${label}`);
 }
 
 // 23. Closing mid-morph removes the snapshot and stops driving the window.

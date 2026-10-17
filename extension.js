@@ -20,10 +20,10 @@ const COVER_FADE_MS = 120;
 // Morph style: the live window fades in over this long once the app has
 // drawn its final size, or from this fraction of the motion at the latest
 // (minimum-size apps never reach the requested size).
-// The crossfade lasts up to MORPH_FADE_MS but always ends by MORPH_FADE_END
-// of the motion (never shorter than MORPH_MIN_FADE_MS), so the snapshot never
-// lingers half-transparent over a window that has already landed.
-const MORPH_FADE_MS = 70;
+// The crossfade lasts up to the morph-fade setting but always ends by
+// MORPH_FADE_END of the motion (never shorter than MORPH_MIN_FADE_MS unless
+// the setting is lower), so the snapshot never lingers half-transparent
+// over a window that has already landed. morph-fade 0 swaps instantly.
 const MORPH_MIN_FADE_MS = 16;
 const MORPH_FADE_END = 0.9;
 const MORPH_READY_LIMIT = 0.6;
@@ -463,9 +463,10 @@ export default class KeyboardMonitorSnap extends Extension {
                 ? interpolateRect(glide.from, end, smoothstep((elapsed-glide.at)/glide.ms)) : end;
             const curveAt = elapsed => interpolateRect(from, endAt(elapsed), easeOutCubic(elapsed/duration));
             // Elapsed time when the live window began to fade in, and how long
-            // that fade lasts.
+            // that fade lasts (read once per snap; live-tunable).
+            const fadeLimit = this._settings.get_int('morph-fade');
             let fadeFrom = null;
-            let fadeMs = MORPH_FADE_MS;
+            let fadeMs = fadeLimit;
             // When the app last drew anything (the snapshot counts as drawn).
             let lastDamage = GLib.get_monotonic_time();
             let finished = false;
@@ -504,7 +505,7 @@ export default class KeyboardMonitorSnap extends Extension {
                     // on its own while the hold keeps the window on target.
                     actor.opacity = 255;
                     this._showAt(window, actor, end, exact);
-                    effects.dropCover(fadeFrom === null ? MORPH_MIN_FADE_MS
+                    effects.dropCover(fadeFrom === null ? Math.min(fadeLimit, MORPH_MIN_FADE_MS)
                         : Math.max(0, fadeMs-(elapsed-fadeFrom)));
                     this._hold(window, actor, end, exact);
                 } else if (!operation.superseded) {
@@ -534,13 +535,14 @@ export default class KeyboardMonitorSnap extends Extension {
                 const ready = sized && now-lastDamage >= MORPH_QUIET_MS*1000;
                 if (fadeFrom === null && (ready || late)) {
                     fadeFrom = elapsed;
-                    fadeMs = Math.max(MORPH_MIN_FADE_MS,
-                        Math.min(MORPH_FADE_MS, MORPH_FADE_END*duration-elapsed));
+                    fadeMs = Math.max(Math.min(fadeLimit, MORPH_MIN_FADE_MS),
+                        Math.min(fadeLimit, MORPH_FADE_END*duration-elapsed));
                 }
                 if (fadeFrom !== null) {
                     actor.opacity = 255;
                     this._showAt(window, actor, curve, exact);
-                    cover.opacity = Math.round(255*(1-Math.min(1, (elapsed-fadeFrom)/fadeMs)));
+                    cover.opacity = fadeMs <= 0 ? 0
+                        : Math.round(255*(1-Math.min(1, (elapsed-fadeFrom)/fadeMs)));
                 } else {
                     // Still covered: remember what is on screen for interruptions.
                     const visual = this._visuals.get(window) ?? {};
@@ -550,7 +552,7 @@ export default class KeyboardMonitorSnap extends Extension {
                 if (this._settings.get_boolean('debug-logging'))
                     console.log(`${this.uuid}: FRAME ${JSON.stringify({id:window.get_id(), style:'morph', elapsed,
                         curve, end, drawn, mutter:rect(window.get_frame_rect()), sized, ready, fadeFrom,
-                        sinceDamage:Math.round((now-lastDamage)/1000), cover:cover.opacity,
+                        sinceDamage:Math.round((now-lastDamage)/1000), cover:cover.opacity, fadeMs,
                         scale:[actor.scale_x, actor.scale_y].map(v => Math.round(v*1000)/1000)})}`);
             }, 'completed', () => finish(), this);
             actor.connectObject('destroy', () => operation.cancel(),

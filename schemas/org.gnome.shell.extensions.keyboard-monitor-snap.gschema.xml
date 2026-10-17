@@ -22,6 +22,11 @@
       <default>'live'</default>
       <summary>live: the window resizes live along the curve; morph: a snapshot moves along the curve and the final layout fades in</summary>
     </key>
+    <key name="morph-fade" type="i">
+      <range min="0" max="200"/>
+      <default>70</default>
+      <summary>Morph style: longest crossfade from snapshot to live window, in milliseconds (0 = instant swap)</summary>
+    </key>
     <key name="debug-logging" type="b"><default>false</default></key>
     <key name="saved-bindings" type="s"><default>''</default></key>
   </schema>
