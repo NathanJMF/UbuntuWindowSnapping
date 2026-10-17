@@ -9,7 +9,7 @@ import {anchorFor} from '../placement.js';
 const root = Gio.File.new_for_uri(import.meta.url).get_parent().get_parent().get_path();
 const text = new TextDecoder().decode(GLib.file_get_contents(`${root}/extension.js`)[1]);
 const setup = `
-export const mock = {widgets:[], later:[], missingKeys:new Set(), missingSchemas:new Set(), lateUnmaximize:0, halfEase:false, lateSizeChange:false, monitors:2, invalidMonitorCalls:[], clock:0, ints:{'animation-duration':120,'max-stretch':3,'morph-fade':70}, timelines:[], focus:null,
+export const mock = {redraws:0, widgets:[], later:[], missingKeys:new Set(), missingSchemas:new Set(), lateUnmaximize:0, halfEase:false, lateSizeChange:false, monitors:2, invalidMonitorCalls:[], clock:0, ints:{'animation-duration':120,'max-stretch':3,'morph-fade':70}, timelines:[], focus:null,
  neighbor:-1, bindings:new Map(), values:new Map(), defaults:new Map(), resets:[], handler:{}, grab:null,
  timers:new Map(), pending:[], nativeEffects:0, skippedEffects:0};
 export function signals(o) {
@@ -79,7 +79,7 @@ const Main = {layoutManager:signals({}), extensionManager:{lookup:() => ({stateO
 class Rect {constructor(r) {Object.assign(this, r);}}
 const Twm = {clearTilingProps() {}, updateTileGroup() {}, saveTileState() {},
  isMaximized:w => w.maximizedHorizontally && w.maximizedVertically};
-globalThis.global = {window_manager:signals({}), window_group:{add_child() {}, set_child_above_sibling(a) {a.below = false;},
+globalThis.global = {window_manager:signals({}), window_group:{queue_redraw() {mock.redraws++;}, add_child() {}, set_child_above_sibling(a) {a.below = false;},
   set_child_below_sibling(a) {a.below = true;}},
  display:{get focus_window() {return mock.focus;}, get_monitor_neighbor_index:() => mock.neighbor,
   get_n_monitors:() => mock.monitors,
@@ -1150,6 +1150,33 @@ async function watchReveal(w, dir, steps = 120) {
     clean(c, 'reveal closed');
     mock.values.set('custom:animation-style', 'morph');
 }
+
+// 22p. Crossing monitors repaints the window layer on every frame (and at
+// the end) in every style, so nothing is left behind on the monitor the
+// window leaves; moves within a monitor do not.
+for (const style of ['reveal', 'morph', 'live']) {
+    mock.values.set('custom:animation-style', style);
+    const w = fresh({frame:{x:500, y:0, width:500, height:800}, lag:15});
+    mock.neighbor = 1;
+    e._states.set(w, {layout:{x:'right', y:null}, monitor:0, rect:{x:500, y:0, width:500, height:800}, frame:{x:500, y:0, width:500, height:800}});
+    mock.redraws = 0;
+    const p = press('right');
+    await settle(600);
+    await p;
+    assert(w.frame.x === 1000, `${style}: crossed to the next monitor`);
+    assert(mock.redraws >= 20, `${style}: crossing repaints every frame (${mock.redraws} repaints)`);
+    clean(w, `${style} crossing repaint`);
+
+    const v = fresh({frame:{x:0, y:0, width:500, height:800}, lag:15});
+    halfState(v);
+    mock.redraws = 0;
+    const q = press('down');
+    await settle(600);
+    await q;
+    assert(mock.redraws === 0, `${style}: no extra repaints within one monitor`);
+    clean(v, `${style} same-monitor`);
+}
+mock.values.set('custom:animation-style', 'morph');
 
 // 23. Closing mid-morph removes the snapshot and stops driving the window.
 {

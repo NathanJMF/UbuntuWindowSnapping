@@ -373,3 +373,11 @@ In reveal style, shrinking moves looked right but growing ones still stretched a
 - **Keep the snapshot on top at its own size**, stretched only while the app has drawn nothing bigger, then fade it out at the learned handover. The switch is a dissolve between two crisp layouts, as when shrinking.
 
 Validation: 688 checks (121 rules, 77 adapter, 80 delayed placement, 410 lifecycle), with each growing behaviour mutation-checked.
+
+## Crossing repaints (version 27, experiment/animations branch)
+
+Moving from the portrait monitor to the main one in reveal style left ghost images on the portrait monitor. In version 26's logs (46 such crossings), Claude had drawn its final 1280×1355 frame within about 9 ms and Mutter had already placed the window on the main monitor. Reveal then drew that live window shifted back along the curve, on the portrait monitor, for over 100 ms. GNOME repaints each monitor separately and decides what to repaint from where it thinks windows are, so the area the shifted window left behind on the portrait monitor was apparently not repainted. This is the likely explanation; it cannot be confirmed from the logs.
+
+Placements that change monitors now repaint the whole window layer on every animation frame, once when the motion ends, and once 20 ms later. The window layer includes the backgrounds, so it spans every monitor. This applies to all three styles; moves within one monitor are unaffected.
+
+Validation: 733 checks (121 rules, 77 adapter, 80 delayed placement, 455 lifecycle), including crossings in each style and same-monitor moves (which must not repaint), both mutation-checked.

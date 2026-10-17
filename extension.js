@@ -277,6 +277,10 @@ export default class KeyboardMonitorSnap extends Extension {
     }
     async _place(window, target, monitor, operation) {
         operation.targetMonitor = monitor;
+        // While a window is drawn shifted across monitors, GNOME may not
+        // repaint the area it leaves on the monitor it is officially no
+        // longer on, leaving ghost images; crossings repaint every frame.
+        operation.crossing = window.get_monitor() !== monitor;
         operation.target = target;
         const original = window.untiledRect ?? new Rect(window.get_frame_rect());
         Twm.clearTilingProps(window.get_id());
@@ -386,6 +390,7 @@ export default class KeyboardMonitorSnap extends Extension {
                 actor.disconnectObject(timeline);
                 window.disconnectObject?.(timeline);
                 timeline.stop();
+                this._repaintCrossing(operation, true);
                 if (!error)
                     this._hold(window, actor, to, {anchor, maxStretch, growth});
                 else if (!operation.superseded)
@@ -396,6 +401,7 @@ export default class KeyboardMonitorSnap extends Extension {
             };
             operation.cancelAnimation = () => finish(new Error('Placement cancelled'));
             timeline.connectObject('new-frame', () => {
+                this._repaintCrossing(operation);
                 const elapsed = timeline.get_elapsed_time();
                 // What is on screen, not Mutter's frame rect: that can change
                 // as soon as a size is requested, long before the client draws it.
@@ -564,6 +570,7 @@ export default class KeyboardMonitorSnap extends Extension {
                 window.disconnectObject?.(timeline);
                 const elapsed = timeline.get_elapsed_time();
                 timeline.stop();
+                this._repaintCrossing(operation, true);
                 this._observeFollowUp(window, actor, sizedAt, draws, from, to);
                 if (!error) {
                     // The live window takes over; an unfinished fade completes
@@ -583,6 +590,7 @@ export default class KeyboardMonitorSnap extends Extension {
             };
             operation.cancelAnimation = () => finish(new Error('Placement cancelled'));
             timeline.connectObject('new-frame', () => {
+                this._repaintCrossing(operation);
                 const elapsed = timeline.get_elapsed_time();
                 const now = GLib.get_monotonic_time();
                 const drawn = this._drawnFrame(window, actor).frame;
@@ -745,6 +753,22 @@ export default class KeyboardMonitorSnap extends Extension {
         this._followUp.set(window, sorted[Math.min(sorted.length-1,
             Math.floor(MORPH_FOLLOW_PERCENTILE*sorted.length))]);
         this._trace(window, 'follow-up', {sample: Math.round(follow), learned: Math.round(this._followUp.get(window))});
+    }
+    // Repaint the whole window layer (it includes the backgrounds, so it spans
+    // every monitor) during a crossing. At the end, once more a frame later,
+    // after the window's final geometry has been drawn.
+    _repaintCrossing(operation, last = false) {
+        if (!operation?.crossing)
+            return;
+        global.window_group.queue_redraw();
+        if (!last)
+            return;
+        const source = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 20, () => {
+            this._traceTimers.delete(source);
+            global.window_group.queue_redraw();
+            return GLib.SOURCE_REMOVE;
+        });
+        this._traceTimers.add(source);
     }
     // The window frame as currently drawn: the actor's own geometry (synced
     // only when the client's new buffer is shown) minus Mutter's current

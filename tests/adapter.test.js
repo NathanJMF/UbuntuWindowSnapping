@@ -58,7 +58,7 @@ const Twm={clearTilingProps:()=>{},updateTileGroup:()=>{},saveTileState:()=>{},i
   const full=new Rect(a).equal(r);
   w.maximizedHorizontally=full;w.maximizedVertically=full;w.isTiled=!full;w.tiledRect=full?null:r;
  }};
-globalThis.global={window_manager:{connect:()=>1,disconnect(){}},window_group:{add_child(){},set_child_above_sibling(){}},display:{get focus_window(){return mock.focus;},
+globalThis.global={window_manager:{connect:()=>1,disconnect(){}},window_group:{queue_redraw(){},add_child(){},set_child_above_sibling(){},set_child_below_sibling(){}},display:{get focus_window(){return mock.focus;},
  get_monitor_neighbor_index:()=>mock.neighbor,get_n_monitors:()=>2,connect:(n,cb)=>{mock.grab=cb;return 1;},disconnect:()=>{mock.grab=null;}}};
 `;
 const folder = GLib.dir_make_tmp('keyboard-snap-tests-XXXXXX');
