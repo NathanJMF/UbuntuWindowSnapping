@@ -20,7 +20,12 @@ const COVER_FADE_MS = 120;
 // Morph style: the live window fades in over this long once the app has
 // drawn its final size, or from this fraction of the motion at the latest
 // (minimum-size apps never reach the requested size).
+// The crossfade lasts up to MORPH_FADE_MS but always ends by MORPH_FADE_END
+// of the motion (never shorter than MORPH_MIN_FADE_MS), so the snapshot never
+// lingers half-transparent over a window that has already landed.
 const MORPH_FADE_MS = 70;
+const MORPH_MIN_FADE_MS = 16;
+const MORPH_FADE_END = 0.9;
 const MORPH_READY_LIMIT = 0.6;
 // Chromium-based apps often present their first frame at a new size with
 // the old layout, then re-lay out a frame or two later. The handover waits
@@ -457,8 +462,10 @@ export default class KeyboardMonitorSnap extends Extension {
             const endAt = elapsed => glide
                 ? interpolateRect(glide.from, end, smoothstep((elapsed-glide.at)/glide.ms)) : end;
             const curveAt = elapsed => interpolateRect(from, endAt(elapsed), easeOutCubic(elapsed/duration));
-            // Elapsed time when the live window began to fade in.
+            // Elapsed time when the live window began to fade in, and how long
+            // that fade lasts.
             let fadeFrom = null;
+            let fadeMs = MORPH_FADE_MS;
             // When the app last drew anything (the snapshot counts as drawn).
             let lastDamage = GLib.get_monotonic_time();
             let finished = false;
@@ -497,8 +504,8 @@ export default class KeyboardMonitorSnap extends Extension {
                     // on its own while the hold keeps the window on target.
                     actor.opacity = 255;
                     this._showAt(window, actor, end, exact);
-                    effects.dropCover(fadeFrom === null ? MORPH_FADE_MS
-                        : Math.max(0, MORPH_FADE_MS-(elapsed-fadeFrom)));
+                    effects.dropCover(fadeFrom === null ? MORPH_MIN_FADE_MS
+                        : Math.max(0, fadeMs-(elapsed-fadeFrom)));
                     this._hold(window, actor, end, exact);
                 } else if (!operation.superseded) {
                     this._clearVisual(window, false, actor);
@@ -525,12 +532,15 @@ export default class KeyboardMonitorSnap extends Extension {
                 cover.set_size(curve.width, curve.height);
                 const sized = sameSize(drawn, end);
                 const ready = sized && now-lastDamage >= MORPH_QUIET_MS*1000;
-                if (fadeFrom === null && (ready || late))
+                if (fadeFrom === null && (ready || late)) {
                     fadeFrom = elapsed;
+                    fadeMs = Math.max(MORPH_MIN_FADE_MS,
+                        Math.min(MORPH_FADE_MS, MORPH_FADE_END*duration-elapsed));
+                }
                 if (fadeFrom !== null) {
                     actor.opacity = 255;
                     this._showAt(window, actor, curve, exact);
-                    cover.opacity = Math.round(255*(1-Math.min(1, (elapsed-fadeFrom)/MORPH_FADE_MS)));
+                    cover.opacity = Math.round(255*(1-Math.min(1, (elapsed-fadeFrom)/fadeMs)));
                 } else {
                     // Still covered: remember what is on screen for interruptions.
                     const visual = this._visuals.get(window) ?? {};

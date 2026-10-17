@@ -709,10 +709,15 @@ const halfState = w => e._states.set(w, {layout:{x:'left', y:null}, monitor:0,
 // snapshot's path, re-aims, and the hold target.
 async function watchMorph(w, dir, {stepMs = 4, steps = 80} = {}) {
     mock.widgets = [];
-    const result = {shownAt:null, content:null, reaims:[], holds:[]};
+    const result = {shownAt:null, content:null, reaims:[], holds:[], goneAt:null, landedAt:null};
     const realTrace = e._trace.bind(e), realHold = e._hold.bind(e);
     e._trace = (w_, phase, extra) => {if (phase === 'morph-reaim') result.reaims.push(extra); realTrace(w_, phase, extra);};
-    e._hold = (w_, actor, target, shape) => {result.holds.push({...target}); realHold(w_, actor, target, shape);};
+    // The hold starts on the motion's last frame: that is when it lands.
+    e._hold = (w_, actor, target, shape) => {
+        result.holds.push({...target});
+        result.landedAt ??= (mock.clock-start)/1000;
+        realHold(w_, actor, target, shape);
+    };
     const start = mock.clock;
     const p = press(dir);
     for (let i = 0; i < steps; i++) {
@@ -721,6 +726,10 @@ async function watchMorph(w, dir, {stepMs = 4, steps = 80} = {}) {
             result.shownAt = (mock.clock-start)/1000;
             result.content = w.content;
         }
+        // When the snapshot first became fully transparent (or was removed).
+        const snap = mock.widgets[0];
+        if (result.goneAt === null && snap && (snap.opacity === 0 || snap.destroyed))
+            result.goneAt = (mock.clock-start)/1000;
     }
     await settle(800);
     await p;
@@ -789,6 +798,10 @@ const maxJump = moves => {
     assert(r.shownAt !== null && r.shownAt <= 62, `slow app: handover at 60% of the motion (at ${r.shownAt} ms)`);
     assert(r.reaims.length === 0 && r.moves.at(-1).width === 500,
         'slow app: no re-aim at the unanswered old size; snapshot ends at the requested size');
+    // Handover at 54 ms of a 90 ms motion: the fade must end by 90% of it,
+    // a few frames before landing, not run 70 ms past it.
+    assert(r.goneAt !== null && r.goneAt <= r.landedAt-6,
+        `late handover: snapshot gone before the window lands (gone ${r.goneAt} ms, landed ${r.landedAt} ms)`);
     clean(w, 'morph slow app');
 }
 
@@ -818,6 +831,9 @@ const maxJump = moves => {
     w.video = false;
     mock.ints['animation-duration'] = 120;
     assert(r.shownAt >= 106 && r.shownAt <= 112, `video: handover at 60% of the motion (at ${r.shownAt} ms)`);
+    // 180 ms motion: the fade ends by 90% of it, well before landing.
+    assert(r.goneAt !== null && r.goneAt <= r.landedAt-14,
+        `video: snapshot gone before the window lands (gone ${r.goneAt} ms, landed ${r.landedAt} ms)`);
     clean(w, 'morph video');
 }
 

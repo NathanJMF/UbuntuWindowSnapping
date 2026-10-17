@@ -304,3 +304,9 @@ Version 20, built on version 17:
 `FRAME` logs include `end`, `mutter`, `sized`, `ready` and `sinceDamage`; re-aims log a `morph-reaim` trace.
 
 Validation: 516 checks (121 rules, 77 adapter, 79 delayed placement, 239 lifecycle), including a minimum-size app, a late floating draw, an X11-style frame, a 300 ms app, a re-laying-out app and video. Each behaviour was mutation-checked; the one surviving mutation (dropping the drawn-equals-Mutter-frame check) only removes a redundant guard.
+
+## Crossfade ends before landing (version 21, experiment/animations branch)
+
+A faint, faded-looking frame showed at the end of some morphs. In version 20's logs (67 Claude snaps), waiting for content to settle put the handover a median third of the way into the motion (90th percentile 57%). The fixed 70 ms crossfade then ran past the landing in 25 snaps, leaving the old snapshot half-transparent over the landed window for 7–37 ms. The fade now ends by 90% of the motion: up to 70 ms if there is room, shorter after a late handover, never under 16 ms.
+
+Validation: 518 checks (121 rules, 77 adapter, 79 delayed placement, 241 lifecycle); a late-handover test asserts the snapshot is gone a few frames before the window lands.
