@@ -32,7 +32,7 @@ MUTATIONS = [
      "            placeWidget(cover, snapshotLayout(outline, natural, anchor, true));",
      "            placeWidget(cover, snapshotLayout(outline, outline, anchor, true));"),
     ('shrinking live window is unscaled', 'reveal.js',
-     "                visuals.showRevealed(window, actor, outline, anchor);\n            } else {",
+     "                visuals.showRevealed(window, actor, outline, anchor, drawn);\n            } else {",
      "                visuals.showAt(window, actor, outline, anchor);\n            } else {"),
     ('re-aim at the drawn granted size', 'reveal.js',
      "                if (g && sameSize(drawn, g) && !sameSize(g, path.end)) {",
