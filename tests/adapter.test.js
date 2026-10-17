@@ -1,74 +1,13 @@
-// Load the actual extension with only its GNOME imports replaced by mocks.
-import Gio from 'gi://Gio';
-import GLib from 'gi://GLib';
-import {sameFrame} from '../placement.js';
-const root = Gio.File.new_for_uri(import.meta.url).get_parent().get_parent().get_path();
-const text = new TextDecoder().decode(GLib.file_get_contents(`${root}/extension.js`)[1]);
-const setup = `
-export const mock = {clockStep:5000, ints:{'animation-duration':250,'max-stretch':100}, animations:false, frames:[], skipped:[], covers:0, focus:null, neighbor:-1, bindings:new Map(), grab:null, tiles:[], values:new Map(), dependencyEnabled:true, timers:new Map(), handler:{}};
-class Settings {
- constructor({schema_id}={}) {this.schema=schema_id??'custom';}
- get_strv(k) {return mock.values.get(this.schema+':'+k)??[];}
- set_strv(k,v) {mock.values.set(this.schema+':'+k,v);}
- get_boolean(k) {return false;}
- get_int(k) {return mock.ints[k]??0;}
- get_string(k) {return mock.values.get(this.schema+':'+k)??'';}
- set_string(k,v) {mock.values.set(this.schema+':'+k,v);}
-}
-const Gio={Settings};
-const GLib={PRIORITY_DEFAULT:0,SOURCE_CONTINUE:true,get_monotonic_time:(()=>{let t=0;return ()=>t+=mock.clockStep;})(),
- timeout_add:(p,ms,cb)=>{const id=mock.timers.size+1;mock.timers.set(id,cb);return id;},
- Source:{remove:id=>mock.timers.delete(id)}};
-class Extension {getSettings(){return new Settings();}}
-const Meta={WindowClientType:{WAYLAND:0,X11:1},DisplayDirection:{LEFT:0,RIGHT:1,UP:2,DOWN:3},KeyBindingFlags:{IGNORE_AUTOREPEAT:1},MaximizeFlags:{BOTH:3}};
-const Shell={ActionMode:{NORMAL:1}};
-const St={Settings:{get:()=>({enable_animations:mock.animations,slow_down_factor:1})},
- Widget:class{constructor(){mock.covers++;} set_position(){} set_size(){} ease({onStopped}){onStopped?.();} destroy(){}}};
-// Timeline frames run synchronously; progress is already eased by the mode.
-class Timeline {
- constructor({actor,duration}) {this.actor=actor;this.duration=duration;this.handlers={};this.progress=0;}
- connectObject(...args) {for(let i=0;i+1<args.length;i+=2)if(typeof args[i+1]==='function')this.handlers[args[i]]=args[i+1];}
- disconnectObject() {this.handlers={};}
- get_elapsed_time() {return this.progress*this.duration;}
- stop() {this.stopped=true;}
- start() {
-  const frames=[0.25,0.5,0.75,1];
-  const run=from=>{
-   for (let i=from;i<frames.length;i++) {
-    if(this.stopped)return;
-    // A paused timeline lets a test press keys mid-motion.
-    if(mock.pauseAt===i&&this.duration>150){mock.pauseAt=null;mock.resume=()=>run(i);return;}
-    this.progress=frames[i];this.handlers['new-frame']?.();
-   }
-   if(!this.stopped)this.handlers.completed?.();
-  };
-  run(0);
- }
-}
-const Clutter={Timeline,AnimationMode:{EASE_OUT_CUBIC:1,EASE_OUT_QUAD:2}};
-const Main={layoutManager:{connectObject(){},disconnectObject(){}},extensionManager:{lookup:()=>({get stateObj(){return mock.dependencyEnabled ? {_twm:Twm,_keybindingHandler:mock.handler,settings:{getGioObject:()=>({})}} : {};}})},wm:{
- skipNextEffect:a=>mock.skipped.push(a),_skippedActors:new Set(),
- addKeybinding:(k,s,f,m,cb)=>mock.bindings.set(k,cb),removeKeybinding:k=>mock.bindings.delete(k)}};
-class Rect {constructor(r){Object.assign(this,r);} equal(r){return ['x','y','width','height'].every(k=>this[k]===r[k]);}}
-const Twm={clearTilingProps:()=>{},updateTileGroup:()=>{},saveTileState:()=>{},isMaximized:w=>w.maximizedHorizontally&&w.maximizedVertically,
- async tile(w,r,{monitorNr}) {
-  mock.tiles.push({window:w,rect:r,monitor:monitorNr});
-  w.monitor=monitorNr;
-  const a=w.get_work_area_for_monitor(monitorNr);
-  const full=new Rect(a).equal(r);
-  w.maximizedHorizontally=full;w.maximizedVertically=full;w.isTiled=!full;w.tiledRect=full?null:r;
- }};
-globalThis.global={window_manager:{connect:()=>1,disconnect(){}},window_group:{queue_redraw(){},add_child(){},set_child_above_sibling(){},set_child_below_sibling(){}},display:{get focus_window(){return mock.focus;},
- get_monitor_neighbor_index:()=>mock.neighbor,get_n_monitors:()=>2,connect:(n,cb)=>{mock.grab=cb;return 1;},disconnect:()=>{mock.grab=null;}}};
-`;
-const folder = GLib.dir_make_tmp('keyboard-snap-tests-XXXXXX');
-const path = `${folder}/adapter.js`;
-// Local modules keep the extension's own import lists; GNOME imports are mocked.
-const local = text.match(/^import [^;]* from '\.\/[^']*';$/gm).map(line =>
- line.replace(/'\.\/(.*)'/, (_m, f) => `'${Gio.File.new_for_path(`${root}/${f}`).get_uri()}'`)).join('\n');
-GLib.file_set_contents(path, local + '\n' + setup + text.replace(/^import [^;]*;\n/gm,''));
+// The real extension against the shared mock world (tests/support/gnome.js)
+// with animations off and immediate geometry: snapping rules end to end,
+// per-window state, dependency handling and shortcut ownership.
+import {mock} from './support/gnome.js';
+import {loadExtension} from './support/load.js';
 let count=0;
 function assert(v,msg){count++;if(!v)throw new Error(msg);}
+// Geometry is immediate here; placement.test.js and lifecycle.test.js cover
+// delayed, out-of-order and animated behaviour.
+Object.assign(mock, {animations:false, autoClock:5000, tiles:[]});
 function window(maximized=false){const w={monitor:0,maximizedHorizontally:maximized,maximizedVertically:maximized,
  frame:{x:0,y:0,width:1000,height:800},
  actor:{opacity:255,scale_x:1,scale_y:1,translation_x:0,translation_y:0,
@@ -86,7 +25,7 @@ function window(maximized=false){const w={monitor:0,maximizedHorizontally:maximi
  for(const k of ['x','y','width','height'])Object.defineProperty(w.actor,k,{get:()=>(w.drawn??w.frame)[k]});
  return w;}
 try {
- const {default:Extension,mock}=await import(Gio.File.new_for_path(path).get_uri());
+ const {default:Extension}=await loadExtension();
  function createExtension(){
   const e=new Extension();
   // Geometry is immediate in this adapter mock; placement.test.js exercises
@@ -198,4 +137,4 @@ try {
  inactive.disable();
  assert(mock.timers.size===0&&mock.bindings.size===0,'disable cleans watcher and shortcuts after recovery');
  print(`PASS: ${count} GNOME adapter mock assertions`);
-} finally {GLib.unlink(path);GLib.rmdir(folder);}
+} finally {}

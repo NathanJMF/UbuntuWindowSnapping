@@ -1,106 +1,12 @@
-// Timing-sensitive regressions with step-driven mocks: timelines advance one
-// frame per step and stop() emits 'stopped' (not 'completed'), signal
-// connections are tracked so leaks show, waits honour cancellation, clients
-// draw requested sizes after a fixed latency, and a GNOME-like size-change
-// handler counts native effects. The shipped 3% stretch cap is used.
-import Gio from 'gi://Gio';
+// Timing-sensitive regressions on the frame-stepped mock world in
+// tests/support/gnome.js: timelines advance one frame per step, signal
+// connections are tracked so leaks show, waits honour cancellation, and
+// clients draw requested sizes after a set latency (and can re-lay out,
+// have minimum sizes, or redraw constantly).
 import GLib from 'gi://GLib';
 import {anchorFor} from '../placement.js';
-const root = Gio.File.new_for_uri(import.meta.url).get_parent().get_parent().get_path();
-const text = new TextDecoder().decode(GLib.file_get_contents(`${root}/extension.js`)[1]);
-const setup = `
-export const mock = {redraws:0, widgets:[], later:[], missingKeys:new Set(), missingSchemas:new Set(), lateUnmaximize:0, halfEase:false, lateSizeChange:false, monitors:2, invalidMonitorCalls:[], clock:0, ints:{}, slowDown:1, timelines:[], focus:null,
- neighbor:-1, bindings:new Map(), values:new Map(), defaults:new Map(), resets:[], handler:{}, grab:null,
- timers:new Map(), pending:[], nativeEffects:0, skippedEffects:0};
-export function signals(o) {
- o._h = [];
- o.connectObject = function (...args) {
-  const tracker = args.pop();
-  for (let i = 0; i+1 < args.length; i += 2) this._h.push({sig:args[i], fn:args[i+1], tracker});
- };
- o.disconnectObject = function (tracker) {this._h = this._h.filter(h => h.tracker !== tracker);};
- o.connect = function (sig, fn) {const id = Symbol(sig); this._h.push({sig, fn, tracker:id}); return id;};
- o.disconnect = function (id) {this._h = this._h.filter(h => h.tracker !== id);};
- o.emit = function (sig, ...args) {for (const h of [...this._h]) if (h.sig === sig) h.fn(this, ...args);};
- return o;
-}
-class Settings {
- constructor({schema_id}={}) {
-  if (mock.missingSchemas.has(schema_id)) throw new Error(\`GSettings schema \${schema_id} not found\`);
-  this.schema = schema_id ?? 'custom';
- }
- get_strv(k) {
-  if (mock.missingKeys.has(this.schema+':'+k)) throw new Error(\`GSettings key \${k} not found\`);
-  return mock.values.get(this.schema+':'+k) ?? mock.defaults.get(this.schema+':'+k) ?? [];
- }
- set_strv(k, v) {mock.values.set(this.schema+':'+k, v);}
- get_default_value(k) {const d = mock.defaults.get(this.schema+':'+k); return d ? {deepUnpack:() => [...d]} : null;}
- reset(k) {mock.values.delete(this.schema+':'+k); mock.resets.push(this.schema+':'+k);}
- get_boolean() {return false;}
- get_int(k) {return mock.ints[k] ?? 0;}
- get_string(k) {return mock.values.get(this.schema+':'+k) ?? '';}
- set_string(k, v) {mock.values.set(this.schema+':'+k, v);}
-}
-const Gio = {Settings};
-const GLib = {PRIORITY_DEFAULT:0, SOURCE_CONTINUE:true, SOURCE_REMOVE:false, get_monotonic_time:() => mock.clock,
- timeout_add:(p, ms, cb) => {const id = mock.timers.size+100; mock.timers.set(id, cb); return id;},
- Source:{remove:id => mock.timers.delete(id)}};
-class Extension {getSettings() {return new Settings();}}
-const Meta = {WindowClientType:{WAYLAND:0, X11:1}, DisplayDirection:{LEFT:0, RIGHT:1, UP:2, DOWN:3},
- KeyBindingFlags:{IGNORE_AUTOREPEAT:1}, MaximizeFlags:{BOTH:3}};
-const Shell = {ActionMode:{NORMAL:1}};
-const St = {Settings:{get:() => ({enable_animations:true, slow_down_factor:mock.slowDown})},
- // Snapshot widgets record where they were drawn and whether they are gone.
- Widget:class {
-  constructor() {this.opacity = 255; this.destroyed = false; this.moves = []; mock.widgets.push(this);}
-  set_position(x, y) {this.x = x; this.y = y;}
-  set_size(width, height) {this.width = width; this.height = height; this.moves.push({x:this.x, y:this.y, width, height});}
-  set_clip(x, y, width, height) {
-   this.clip = {x, y, width, height};
-   // The outline on screen: the clip in stage coordinates.
-   (this.outline ??= []).push({x:this.x+x, y:this.y+y, width, height});
-  }
-  ease(p) {if ('opacity' in p) this.opacity = p.opacity; p.onStopped?.();}
-  destroy() {this.destroyed = true; this.opacityAtDestroy = this.opacity;}
- }};
-class Timeline {
- constructor({duration}) {signals(this); this.duration = duration; this.elapsed = 0; mock.timelines.push(this);}
- get_elapsed_time() {return this.elapsed;}
- start() {this.running = true;}
- stop() {if (this.stopped) return; this.stopped = true; this.emit('stopped');}
- tick(ms) {
-  if (!this.running || this.stopped) return;
-  this.elapsed = Math.min(this.duration, this.elapsed+ms);
-  this.emit('new-frame');
-  if (this.elapsed >= this.duration && !this.stopped) {this.stopped = true; this.emit('completed');}
- }
-}
-const Clutter = {Timeline, AnimationMode:{EASE_OUT_QUAD:2}};
-const Main = {layoutManager:signals({}), extensionManager:{lookup:() => ({stateObj:{_twm:Twm, _keybindingHandler:mock.handler,
-  settings:{getGioObject:() => ({})}}})},
- wm:{_skippedActors:new Set(), skipNextEffect(a) {this._skippedActors.add(a);},
-  addKeybinding:k => mock.bindings.set(k, 1), removeKeybinding:k => mock.bindings.delete(k)}};
-class Rect {constructor(r) {Object.assign(this, r);}}
-const Twm = {clearTilingProps() {}, updateTileGroup() {}, saveTileState() {},
- isMaximized:w => w.maximizedHorizontally && w.maximizedVertically};
-globalThis.global = {window_manager:signals({}), window_group:{queue_redraw() {mock.redraws++;}, add_child() {}, set_child_above_sibling(a) {a.below = false;},
-  set_child_below_sibling(a) {a.below = true;}},
- display:{get focus_window() {return mock.focus;}, get_monitor_neighbor_index:() => mock.neighbor,
-  get_n_monitors:() => mock.monitors,
-  connect:(n, cb) => {mock.grab = cb; return 1;}, disconnect() {}}};
-mock.skipped = Main.wm._skippedActors;
-export const layout = Main.layoutManager;
-// GNOME Shell's own handler is connected first and consumes skips.
-global.window_manager.connect('size-change', (_wm, actor) => {
- if (Main.wm._skippedActors.delete(actor)) mock.skippedEffects++;
- else mock.nativeEffects++;
-});
-`;
-const folder = GLib.dir_make_tmp('keyboard-snap-lifecycle-XXXXXX');
-const path = `${folder}/lifecycle.js`;
-const local = text.match(/^import [^;]* from '\.\/[^']*';$/gm).map(line =>
-    line.replace(/'\.\/(.*)'/, (_m, f) => `'${Gio.File.new_for_path(`${root}/${f}`).get_uri()}'`)).join('\n');
-GLib.file_set_contents(path, local + '\n' + setup + text.replace(/^import [^;]*;\n/gm, ''));
+import {mock, signals, Main} from './support/gnome.js';
+import {loadExtension} from './support/load.js';
 let count = 0;
 let lastPassed = '(none)';
 function assert(v, msg) {count++; if (!v) throw new Error(msg); lastPassed = msg;}
@@ -112,7 +18,10 @@ const watchdog = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 60000, () => {
     return GLib.SOURCE_REMOVE;
 });
 try {
-const {default:Ext, mock, signals, layout} = await import(Gio.File.new_for_path(path).get_uri());
+const {default:Ext} = await loadExtension();
+const layout = Main.layoutManager;
+// Lifecycle-only switches on the shared mock state.
+Object.assign(mock, {invalidMonitorCalls:[], lateUnmaximize:0, halfEase:false, floatingLag:0});
 // Two landscape monitors and, when mock.monitors is 3, a portrait one.
 const AREAS = [{x:0, y:0, width:1000, height:800}, {x:1000, y:0, width:1000, height:800},
     {x:2000, y:0, width:400, height:1000}];
@@ -1129,4 +1038,4 @@ for (const style of ['reveal']) {
 
 print(`PASS: ${count} lifecycle assertions`);
 GLib.Source.remove(watchdog);
-} finally {GLib.unlink(path); GLib.rmdir(folder);}
+} finally {}
