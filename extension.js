@@ -71,6 +71,9 @@ export default class KeyboardMonitorSnap extends Extension {
         Main.layoutManager.connectObject('monitors-changed', () => this._monitorsChanged(), this);
         // Manual mouse movement/resizing begins a fresh keyboard sequence.
         this._grabId = global.display.connect('grab-op-begin', (_display, window) => {
+            // GNOME can begin a grab with no window (panel and menu clicks).
+            if (!window)
+                return;
             this._queued.delete(window);
             this._operations.get(window)?.cancel();
             this._visuals.reset(window, false);

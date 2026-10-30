@@ -265,7 +265,9 @@ globalThis.global = {
         },
         get_monitor_neighbor_index: () => mock.neighbor,
         get_n_monitors: () => mock.monitors,
-        connect: (_name, callback) => {
+        connect: (name, callback) => {
+            mock.displayHandlers ??= {};
+            mock.displayHandlers[name] = callback;
             mock.grab = callback;
             return 1;
         },

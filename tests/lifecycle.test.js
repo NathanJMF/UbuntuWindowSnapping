@@ -1223,6 +1223,9 @@ const running = since => mock.timelines.slice(since).filter(t => t.running && !t
         w.actor._h.length === 0 && w._h.length === 0, 'cancelled snap: animation starts nothing');
     e._visuals.reset(w, false);
 }
+// 26k. GNOME can begin a grab with no window (a click on a panel icon).
+mock.displayHandlers['grab-op-begin'](null, null);
+assert(true, 'a grab with no window is ignored');
 // 26i. Disable mid-crossing: every timeline stopped (including follow-up
 // observations started by the cancelled animation), every timer removed
 // (including the delayed final crossing repaint), nothing left connected.

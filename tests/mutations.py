@@ -120,6 +120,9 @@ MUTATIONS = [
     ('hold ends when the actor is destroyed', 'visuals.js',
      "        scope.connect(actor, 'destroy', gone);\n", ""),
     # The extension (extension.js) and shortcuts (bindings.js)
+    ('a grab with no window is ignored', 'extension.js',
+     "            if (!window)\n                return;\n            this._queued.delete(window);",
+     "            this._queued.delete(window);"),
     ('disable removes pending timers', 'extension.js',
      "        for (const source of this._timers)\n            GLib.Source.remove(source);\n", ""),
     ('follow-up observers stop after placements are cancelled', 'extension.js',
