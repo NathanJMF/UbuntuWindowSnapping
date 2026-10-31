@@ -122,6 +122,16 @@ export class Visuals extends Map {
         timeline.start();
     }
 
+    // Draw the window evenly scaled so its width fills `outline`. Shorter
+    // than the outline until the app has drawn the height asked of it, but
+    // never squished.
+    showZoomed(window, actor, outline, {frame} = drawnFrame(window, actor)) {
+        const scale = outline.width/frame.width;
+        actor.remove_clip();
+        this.showAt(window, actor, {...outline, height: frame.height*scale}, {x: 0, y: 0});
+        this.get(window).rect = {...outline};
+    }
+
     // Keep a window that will not fit `slot` evenly scaled into it, asking
     // for the frame that fills the slot at that scale. Ends like a hold: a
     // new motion stops it, anything else resets the window. Returns whether
@@ -133,7 +143,6 @@ export class Visuals extends Map {
         const visual = this.get(window) ?? {};
         visual.stopHold?.();
         this.set(window, visual);
-        actor.remove_clip();
         const scope = new Scope();
         const detach = () => {
             scope.dispose();
@@ -148,14 +157,7 @@ export class Visuals extends Map {
                 this.reset(window, false, actor);
                 return;
             }
-            // Evenly scaled whatever the app has drawn so far: never squished.
-            const {frame} = drawnFrame(window, actor);
-            const scale = slot.width/frame.width;
-            this.showAt(window, actor, {...slot, height: frame.height*scale}, {x: 0, y: 0});
-            visual.rect = {...slot};
-            this._trace(window, 'zoom-show', {drawn: frame, actor: {x: actor.x, y: actor.y, width: actor.width, height: actor.height},
-                buffer: rect(window.get_buffer_rect()), scale: [actor.scale_x, actor.scale_y],
-                translation: [actor.translation_x, actor.translation_y]});
+            this.showZoomed(window, actor, slot);
         };
         scope.connect(window, 'size-changed', show, 'position-changed', show);
         // Mutter's frame changes before the app's new image is shown.

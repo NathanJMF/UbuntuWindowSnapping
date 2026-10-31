@@ -44,13 +44,16 @@ function grantedFrame(window, to) {
 // requests the window's geometry; base is the animation length in ms before
 // travel scaling (0: no animation). Resolves when the motion ends; rejects if
 // the snap is cancelled. Without a snapshot the window is simply placed.
-export function reveal({window, from, to, apply, snap, effects, visuals, followUps, debug, base, repaint}) {
+// `slot`, for an app whose minimum size will not fit: the motion ends there
+// with the window, `to`, evenly scaled into it (see Visuals.zoom).
+export function reveal({window, from, to, slot, apply, snap, effects, visuals, followUps, debug, base, repaint}) {
     const actor = window.get_compositor_private();
     const cover = effects.snapshot();
     if (!base || !actor || !cover)
         return Promise.resolve();
-    const path = new EasedPath(from, to, travelDuration(base, from, to));
-    const anchor = contentAnchor(from, to);
+    const landing = slot ?? to;
+    const path = new EasedPath(from, landing, travelDuration(base, from, landing));
+    const anchor = contentAnchor(from, landing);
     const growing = path.growing;
     const followUp = followUps.get(window);
     debug.trace(window, 'animate', {from, to, duration: path.duration, followUp: Math.round(followUp),
@@ -71,6 +74,9 @@ export function reveal({window, from, to, apply, snap, effects, visuals, followU
     }
     // One request for the final size; nothing in between.
     apply(to);
+    const showLive = (outline, drawn) => slot
+        ? visuals.showZoomed(window, actor, outline)
+        : visuals.showRevealed(window, actor, outline, anchor, drawn);
     return new Promise((resolve, reject) => {
         const scope = new Scope();
         const timeline = scope.timeline(new Clutter.Timeline({actor, duration: path.duration}));
@@ -97,10 +103,16 @@ export function reveal({window, from, to, apply, snap, effects, visuals, followU
                 // the hold keeps the window on target.
                 actor.opacity = 255;
                 actor.remove_clip();
-                visuals.showAt(window, actor, path.end, anchor);
+                if (slot)
+                    visuals.showZoomed(window, actor, slot);
+                else
+                    visuals.showAt(window, actor, path.end, anchor);
                 effects.dropBackdrop();
                 effects.dropCover(growing ? handover.remaining(elapsed) : 0);
-                visuals.hold(window, actor, path.end, anchor);
+                if (slot)
+                    visuals.zoom(window, actor, slot);
+                else
+                    visuals.hold(window, actor, path.end, anchor);
             } else if (!snap.superseded) {
                 // A superseded motion keeps its transform: the next one starts
                 // from what is on screen.
@@ -121,7 +133,7 @@ export function reveal({window, from, to, apply, snap, effects, visuals, followU
             // size that Mutter confirms. Mutter's frame alone cannot tell "not
             // answered yet" from "answered with the old size", so an app that
             // never visibly resizes is not re-aimed.
-            if (!handover.started && !sameSize(drawn, path.end) && !sameSize(drawn, startSize)) {
+            if (!slot && !handover.started && !sameSize(drawn, path.end) && !sameSize(drawn, startSize)) {
                 const g = grantedFrame(window, to);
                 if (g && sameSize(drawn, g) && !sameSize(g, path.end)) {
                     const was = path.retarget(elapsed, g, REAIM_MS);
@@ -137,19 +149,19 @@ export function reveal({window, from, to, apply, snap, effects, visuals, followU
             } else {
                 placeWidget(cover, snapshotLayout(outline, natural, anchor, true));
             }
-            const sized = sameSize(drawn, path.end);
+            const sized = sameSize(drawn, slot ? to : path.end);
             const fade = handover.update({elapsed, now, sized, lastDamage});
             if (growing) {
                 // Live window underneath at its true size throughout; the
                 // snapshot on top fades out from the handover.
-                visuals.showRevealed(window, actor, outline, anchor, drawn);
+                showLive(outline, drawn);
                 if (fade !== null)
                     cover.opacity = Math.round(255*(1-fade));
             } else if (fade !== null) {
                 // The live window fades in on top, unscaled and cropped; the
                 // snapshot underneath stays until the motion ends.
                 actor.opacity = Math.round(255*fade);
-                visuals.showRevealed(window, actor, outline, anchor, drawn);
+                showLive(outline, drawn);
             } else {
                 // Still covered: remember what is on screen for interruptions.
                 const visual = visuals.get(window) ?? {};

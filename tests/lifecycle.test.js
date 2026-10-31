@@ -1277,6 +1277,64 @@ const zoomed = async (opts = {}) => {
     clean(m, 'zoom ended by maximizing outside the shortcuts');
 }
 
+// 27a. A minimum Mutter already knows: one motion straight into the zoom,
+// with no landing at the real size first.
+{
+    const w = fresh({frame:{x:100, y:100, width:700, height:500}, lag:15});
+    w.minWidth = 600;
+    w.get_min_size = () => [true, 600, 400];
+    const r = await watchMorph(w, 'left', {stepMs:2, steps:60});
+    w.emit('size-changed');
+    assert(w.requests.length > 0 && w.requests.every(q => q.width === 600 && q.height === 960),
+        `only the zoomed size is requested (${JSON.stringify(w.requests[0])})`);
+    assert(r.reaims.length === 0 && r.holds.length === 0, 'no re-aim and no hold');
+    assert(r.moves.at(-1).width === 500 && r.moves.at(-1).height === 800, 'the outline lands on the slot');
+    assert(Math.abs(w.actor.scale_x-500/600) < 0.001 && Math.abs(w.actor.scale_y-w.actor.scale_x) < 0.0001, 'lands evenly scaled');
+    assert(w.tiledRect.width === 500, 'Tiling Assistant sees the slot');
+    assert(Math.round(w.drawn.height*w.actor.scale_y) === 800, 'fills the slot');
+    mock.grab(null, w);
+    clean(w, 'direct zoom ended by a grab');
+    // In the motion too: the live window is scaled, never cropped.
+    const m = fresh({frame:{x:100, y:100, width:700, height:500}, lag:15});
+    m.minWidth = 600;
+    m.get_min_size = () => [true, 600, 400];
+    const q = press('left');
+    let sampled = 0;
+    for (let i = 0; i < 80 && !(e._visuals.get(m)?.zoomed); i++) {
+        await step(2);
+        assert(!m.actor.clip, 'never cropped in the motion');
+        if (!e._visuals.get(m)?.zoomed && m.actor.opacity > 0 && m.actor.scale_x < 1)
+            sampled++;
+    }
+    await finishes(q, 'motion into zoom');
+    assert(sampled > 0, 'the live window is seen scaled during the motion');
+    mock.grab(null, m);
+    // Fits, or X11: nothing changes.
+    const v = fresh({frame:{x:100, y:100, width:700, height:500}, lag:15});
+    v.get_min_size = () => [true, 300, 200];
+    await finishes(press('left'), 'small minimum');
+    await settle(300);
+    assert(v.requests.every(q => q.width === 500), 'a minimum that fits changes nothing');
+    clean(v, 'small minimum');
+    const x = fresh({frame:{x:100, y:100, width:700, height:500}, lag:15});
+    x.minWidth = 600;
+    x.get_min_size = () => [true, 600, 400];
+    x.get_client_type = () => 1;
+    await finishes(press('left'), 'X11 minimum');
+    await settle(300);
+    assert(x.actor.scale_x === 1 && x.requests[0].width === 500, 'X11: requested as before');
+    clean(x, 'X11 known minimum');
+    // Shadows are part of a minimum; maximized windows never zoom.
+    const s = fresh({frame:{x:100, y:100, width:700, height:500}, lag:15});
+    s.minWidth = 600;
+    s.get_buffer_rect = function () {return {...this.frame, width:this.frame.width+32, height:this.frame.height+42};};
+    s.get_min_size = () => [true, 632, 442];
+    await finishes(press('left'), 'shadowed minimum');
+    await settle(300);
+    assert(s.requests[0].width === 600, `the shadow is not counted (${s.requests[0].width})`);
+    mock.grab(null, s);
+}
+
 // 26k. GNOME can begin a grab with no window (a click on a panel icon).
 mock.displayHandlers['grab-op-begin'](null, null);
 assert(true, 'a grab with no window is ignored');

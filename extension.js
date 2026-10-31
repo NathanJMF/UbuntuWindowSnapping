@@ -17,7 +17,7 @@ import {Bindings} from './bindings.js';
 import {createEffects} from './effects.js';
 import {FULL, step, rectangle} from './engine.js';
 import {FollowUpTracker} from './follow-up-tracker.js';
-import {sameFrame} from './geometry.js';
+import {sameFrame, zoomFor} from './geometry.js';
 import {placeWindow} from './placement.js';
 import {reveal} from './reveal.js';
 import {Snap} from './scope.js';
@@ -284,9 +284,12 @@ export default class KeyboardMonitorSnap extends Extension {
             if (tracked && !superseded)
                 operation.previousPlacement = {monitor: state.monitor, target: state.rect, frame: state.frame};
             intended = {layout, monitor, rect: target};
-            const applied = await this._place(window, target, monitor, operation);
+            const zoomed = this._zoomedFrame(window, target, monitor);
+            operation.slot = zoomed ? target : null;
+            const applied = await this._place(window, zoomed ?? target, monitor, operation);
             this._states.set(window, {...intended, frame: applied.frame});
-            this._zoom(window, target, applied);
+            if (!zoomed)
+                this._zoom(window, target, applied);
             // No animation ran (real frame already on target) but an
             // interrupted motion left a transform: relax it.
             if (this._visuals.has(window) && !this._visuals.get(window).stopHold)
@@ -314,11 +317,29 @@ export default class KeyboardMonitorSnap extends Extension {
             await this._run(window, next);
     }
 
-    // Scale a Wayland app that stayed larger than its slot to fit it. X11
-    // clicks would land in the wrong place on a scaled window.
+    // X11 clicks would land in the wrong place on a scaled window.
+    _canZoom(window) {
+        return window.get_client_type() !== Meta.WindowClientType.X11;
+    }
+
+    // The frame to ask of a window whose minimum size Mutter already knows
+    // will not fit `slot`, so the snap can move straight into the zoom. Null
+    // when it fits. Minimum sizes include the shadow.
+    _zoomedFrame(window, slot, monitor) {
+        const [known, width, height] = window.get_min_size?.() ?? [false];
+        if (!known || !this._canZoom(window) ||
+            sameFrame(slot, window.get_work_area_for_monitor(monitor), 0))
+            return null;
+        const frame = window.get_frame_rect(), buffer = window.get_buffer_rect();
+        const zoom = zoomFor({width: width-buffer.width+frame.width,
+            height: height-buffer.height+frame.height}, slot);
+        return zoom && {x: slot.x, y: slot.y, width: zoom.width, height: zoom.height};
+    }
+
+    // Scale a Wayland app that turned out larger than its slot to fit it.
     _zoom(window, slot, {full}) {
         const actor = window.get_compositor_private();
-        if (!full && actor && window.get_client_type() !== Meta.WindowClientType.X11)
+        if (!full && actor && this._canZoom(window))
             this._visuals.zoom(window, actor, slot);
     }
 
@@ -384,14 +405,14 @@ export default class KeyboardMonitorSnap extends Extension {
         // intentionally avoided: Chromium can acknowledge them out of order.
         window.untiledRect = original;
         window.isTiled = !applied.full;
-        window.tiledRect = applied.full ? null : new Rect(target);
+        window.tiledRect = applied.full ? null : new Rect(operation.slot ?? target);
         Twm.updateTileGroup([window]);
         Twm.saveTileState(window);
         return applied;
     }
 
     _reveal(window, from, to, apply, operation, effects, crossing = false) {
-        return reveal({window, from, to, apply, snap: operation, effects,
+        return reveal({window, from, to, slot: operation.slot, apply, snap: operation, effects,
             visuals: this._visuals, followUps: this._followUps, debug: this._debug,
             base: this._animationDuration(), repaint: last => this._repaintCrossing(crossing, last)});
     }
