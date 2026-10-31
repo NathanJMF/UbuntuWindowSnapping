@@ -3,7 +3,7 @@
 import {Handover, QUIET_MS, FOLLOW_CAP_MS, FOLLOW_QUIET_MS, FADE_MS, MIN_FADE_MS} from '../handover.js';
 import {followUpDelay, learnFollowUp, FOLLOW_SAMPLES} from '../follow-up.js';
 import {contentAnchor, snapshotLayout, revealedWindowLayout} from '../layers.js';
-import {EasedPath, sameSize} from '../geometry.js';
+import {EasedPath, sameSize, zoomFor, MIN_ZOOM} from '../geometry.js';
 import {Scope, Snap} from '../scope.js';
 import {Debug} from '../trace.js';
 
@@ -186,6 +186,19 @@ function startOf(handover, {sizedAt = null, drawsAt = []} = {}) {
     assert(debug.enabled === true, 'follows a change of the setting');
     debug.dispose();
     assert(settings.handler === null, 'stops listening when disposed');
+}
+
+// Zoom to fit.
+{
+    const slot = {x:540, y:0, width:540, height:1880};
+    assert(zoomFor({width:540, height:1880}, slot) === null, 'a window that fits is not zoomed');
+    assert(zoomFor({width:542, height:1880}, slot) === null, 'nor one within the usual 3 px');
+    const z = zoomFor({width:600, height:1880}, slot);
+    assert(z.scale === 0.9 && z.width === 600 && z.height === 2089, 'evenly scaled, tall enough to fill the slot');
+    const tall = zoomFor({width:540, height:2000}, slot);
+    assert(Math.abs(tall.scale-0.94) < 0.001 && tall.height === 2000, 'a minimum height zooms the same way');
+    assert(zoomFor({width:1010, height:1880}, slot) === null, 'too small to use: left alone');
+    assert(zoomFor({width:540/MIN_ZOOM, height:1880}, slot) !== null, 'the limit itself still zooms');
 }
 
 print(`PASS: ${count} unit assertions`);

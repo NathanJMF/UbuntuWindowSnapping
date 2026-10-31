@@ -127,3 +127,19 @@ export class EasedPath {
         return current;
     }
 }
+
+// Below this an app is too small to use; it keeps its real size instead.
+export const MIN_ZOOM = 0.75;
+
+// An app that stays larger than its slot (its own minimum size) is shown
+// evenly scaled to fit. Returns the scale and the frame to ask for, so that
+// at that scale it fills the slot both ways; null when it fits or would be
+// too small.
+export function zoomFor(frame, slot) {
+    const scale = Math.min(slot.width/frame.width, slot.height/frame.height);
+    if (frame.width-slot.width <= 3 && frame.height-slot.height <= 3)
+        return null;
+    if (scale < MIN_ZOOM)
+        return null;
+    return {scale, width: Math.round(slot.width/scale), height: Math.round(slot.height/scale)};
+}

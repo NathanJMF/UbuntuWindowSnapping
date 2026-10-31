@@ -252,7 +252,7 @@ export default class KeyboardMonitorSnap extends Extension {
             // A maximization or tile change outside these shortcuts resets the
             // sequence. Pure focus changes preserve each window's sequence.
             const tracked = superseded || (state && state.monitor === monitor &&
-                sameFrame(window.get_frame_rect(), state.frame) &&
+                (this._visuals.get(window)?.zoomed || sameFrame(window.get_frame_rect(), state.frame)) &&
                 (state.layout.x || state.layout.y
                     ? !Twm.isMaximized(window)
                     : Twm.isMaximized(window)));
@@ -286,6 +286,7 @@ export default class KeyboardMonitorSnap extends Extension {
             intended = {layout, monitor, rect: target};
             const applied = await this._place(window, target, monitor, operation);
             this._states.set(window, {...intended, frame: applied.frame});
+            this._zoom(window, target, applied);
             // No animation ran (real frame already on target) but an
             // interrupted motion left a transform: relax it.
             if (this._visuals.has(window) && !this._visuals.get(window).stopHold)
@@ -311,6 +312,14 @@ export default class KeyboardMonitorSnap extends Extension {
         const next = this._queued.get(window)?.splice(0) ?? [];
         if (next.length && this._enabled)
             await this._run(window, next);
+    }
+
+    // Scale a Wayland app that stayed larger than its slot to fit it. X11
+    // clicks would land in the wrong place on a scaled window.
+    _zoom(window, slot, {full}) {
+        const actor = window.get_compositor_private();
+        if (!full && actor && window.get_client_type() !== Meta.WindowClientType.X11)
+            this._visuals.zoom(window, actor, slot);
     }
 
     // Run `callback` once after `ms`; cancelled on disable.

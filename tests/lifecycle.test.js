@@ -1223,6 +1223,57 @@ const running = since => mock.timelines.slice(since).filter(t => t.running && !t
         w.actor._h.length === 0 && w._h.length === 0, 'cancelled snap: animation starts nothing');
     e._visuals.reset(w, false);
 }
+// 27. An app that stays wider than its slot (a real minimum of 600 px in a
+// 500 px half) is scaled evenly into the slot, asked for the height that
+// fills it, and stays there until something else moves it.
+const zoomed = async (opts = {}) => {
+    const w = fresh({frame:{x:100, y:100, width:700, height:500}, lag:15, ...opts});
+    w.minWidth = opts.minWidth ?? 600;
+    if (opts.x11) w.get_client_type = () => 1;
+    await finishes(press('left'), 'zoom snap');
+    await settle(400);
+    w.emit('size-changed');
+    return w;
+};
+{
+    const w = await zoomed();
+    const scale = 500/600;
+    assert(Math.abs(w.actor.scale_x-scale) < 0.001 && Math.abs(w.actor.scale_y-w.actor.scale_x) < 0.0001, `scaled evenly (${w.actor.scale_x}, ${w.actor.scale_y})`);
+    assert(w.frame.width === 600 && w.frame.height === 960, `asked for the height that fills the slot (${w.frame.width}x${w.frame.height})`);
+    assert(Math.round(w.frame.height*w.actor.scale_y) === 800 && w.actor.translation_x === 0, 'fills the slot exactly');
+    assert(e._visuals.get(w).rect.width === 500, 'remembered on screen at the slot');
+    // Before the app has drawn the taller frame it is shorter, not squished.
+    w.drawn = {...w.drawn, height:800};
+    w.emit('size-changed');
+    assert(Math.abs(w.actor.scale_y-w.actor.scale_x) < 0.0001, 'still even while the app catches up');
+    w.drawn = {...w.frame};
+    w.emit('size-changed');
+    // Still tracked: the next press is a snap from the half, not a fresh start.
+    await finishes(press('right'), 'zoom to opposite side');
+    await settle(400);
+    w.emit('size-changed');
+    assert(e._states.get(w)?.layout.x === null, `opposite arrow removes the split, as from any half (${e._states.get(w)?.layout.x})`);
+    // A mouse grab ends it at once.
+    mock.grab(null, w);
+    clean(w, 'zoom ended by a grab');
+}
+{
+    const w = await zoomed({x11:true});
+    assert(w.actor.scale_x === 1 && w.frame.height === 800, 'X11 apps are not scaled');
+    clean(w, 'X11 not zoomed');
+    const v = await zoomed({minWidth:800});
+    assert(v.actor.scale_x === 1, 'an app that would be too small keeps its size');
+    clean(v, 'too small not zoomed');
+    const c = await zoomed();
+    assert(c.actor.scale_x < 1, 'zoomed before closing');
+    c.emit('unmanaging');
+    clean(c, 'zoom ended by closing');
+    const m = await zoomed();
+    m.maximizedHorizontally = m.maximizedVertically = true;
+    m.emit('size-changed');
+    clean(m, 'zoom ended by maximizing outside the shortcuts');
+}
+
 // 26k. GNOME can begin a grab with no window (a click on a panel icon).
 mock.displayHandlers['grab-op-begin'](null, null);
 assert(true, 'a grab with no window is ignored');

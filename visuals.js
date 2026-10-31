@@ -4,7 +4,7 @@
 // actor is drawn at; stopHold ends a running hold.
 import Clutter from 'gi://Clutter';
 import GLib from 'gi://GLib';
-import {sameFrame, rect, visualTransform} from './geometry.js';
+import {sameFrame, rect, visualTransform, zoomFor} from './geometry.js';
 import {revealedWindowLayout} from './layers.js';
 import {Scope} from './scope.js';
 
@@ -120,6 +120,47 @@ export class Visuals extends Map {
         scope.connect(actor, 'destroy', gone);
         scope.connect(window, 'unmanaging', gone);
         timeline.start();
+    }
+
+    // Keep a window that will not fit `slot` evenly scaled into it, asking
+    // for the frame that fills the slot at that scale. Ends like a hold: a
+    // new motion stops it, anything else resets the window. Returns whether
+    // the window is zoomed.
+    zoom(window, actor, slot) {
+        const zoom = zoomFor(rect(window.get_frame_rect()), slot);
+        if (!zoom)
+            return false;
+        const visual = this.get(window) ?? {};
+        visual.stopHold?.();
+        this.set(window, visual);
+        actor.remove_clip();
+        const scope = new Scope();
+        const detach = () => {
+            scope.dispose();
+            if (visual.stopHold === detach)
+                visual.stopHold = null;
+            visual.zoomed = false;
+        };
+        visual.stopHold = detach;
+        visual.zoomed = true;
+        const show = () => {
+            if (window.maximizedHorizontally || window.maximizedVertically || window.fullscreen) {
+                this.reset(window, false, actor);
+                return;
+            }
+            // Evenly scaled whatever the app has drawn so far: never squished.
+            const {frame} = drawnFrame(window, actor);
+            const scale = slot.width/frame.width;
+            this.showAt(window, actor, {...slot, height: frame.height*scale}, {x: 0, y: 0});
+            visual.rect = {...slot};
+        };
+        scope.connect(window, 'size-changed', show, 'position-changed', show);
+        scope.connect(window, 'unmanaging', () => this.reset(window, false, actor));
+        scope.connect(actor, 'destroy', () => this.reset(window, false, actor));
+        window.move_resize_frame(true, slot.x, slot.y, zoom.width, zoom.height);
+        show();
+        this._trace(window, 'zoom', {slot, scale: zoom.scale, asked: {width: zoom.width, height: zoom.height}});
+        return true;
     }
 
     // Drop the window's visual state and return its actor to normal,
