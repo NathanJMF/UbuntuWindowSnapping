@@ -3,7 +3,7 @@
 import {Handover, QUIET_MS, FOLLOW_CAP_MS, FOLLOW_QUIET_MS, FADE_MS, MIN_FADE_MS} from '../handover.js';
 import {followUpDelay, learnFollowUp, FOLLOW_SAMPLES} from '../follow-up.js';
 import {contentAnchor, snapshotLayout, revealedWindowLayout} from '../layers.js';
-import {EasedPath, sameSize, zoomFor, MIN_ZOOM} from '../geometry.js';
+import {EasedPath, sameSize, zoomFor, MIN_ZOOM, grownFrame} from '../geometry.js';
 import {Scope, Snap} from '../scope.js';
 import {Debug} from '../trace.js';
 
@@ -199,6 +199,29 @@ function startOf(handover, {sizedAt = null, drawsAt = []} = {}) {
     assert(Math.abs(tall.scale-0.94) < 0.001 && tall.height === 2000, 'a minimum height zooms the same way');
     assert(zoomFor({width:1200, height:1880}, slot) === null, 'too small to use: left alone');
     assert(zoomFor({width:540/MIN_ZOOM, height:1880}, slot) !== null, 'the limit itself still zooms');
+}
+
+// Growing toward the middle of the monitor.
+{
+    const area = {x:0, y:0, width:1080, height:1880};
+    const right = {x:540, y:0, width:540, height:1880};
+    const left = {x:0, y:0, width:540, height:1880};
+    const bottom = {x:540, y:940, width:540, height:940};
+    const min = {width:1010, height:400};
+    assert(grownFrame(right, area, {width:540, height:400}) === null, 'a window that fits does not move');
+    const r = grownFrame(right, area, min);
+    assert(r.x === 70 && r.width === 1010 && r.y === 0 && r.height === 1880, 'right side grows left');
+    const l = grownFrame(left, area, min);
+    assert(l.x === 0 && l.width === 1010, 'left side grows right');
+    const b = grownFrame(bottom, area, {width:540, height:1000});
+    assert(b.y === 880 && b.height === 1000 && b.x === 540, 'bottom grows up; the fitting axis stays');
+    const inner = grownFrame({x:600, y:0, width:300, height:1880}, area, {width:500, height:400});
+    assert(inner.x === 400, 'a slot past the middle keeps its far edge, not just on the monitor');
+    const huge = grownFrame(right, area, {width:1200, height:400});
+    assert(huge.x === 0 && huge.width === 1200, 'wider than the monitor: starts at its edge');
+    const offset = {x:2000, y:0, width:400, height:1000};
+    const o = grownFrame({x:2200, y:0, width:200, height:1000}, offset, {width:300, height:100});
+    assert(o.x === 2100, 'works on any monitor');
 }
 
 print(`PASS: ${count} unit assertions`);

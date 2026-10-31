@@ -17,7 +17,7 @@ import {Bindings} from './bindings.js';
 import {createEffects} from './effects.js';
 import {FULL, step, rectangle} from './engine.js';
 import {FollowUpTracker} from './follow-up-tracker.js';
-import {sameFrame, zoomFor} from './geometry.js';
+import {grownFrame, sameFrame, zoomFor} from './geometry.js';
 import {placeWindow} from './placement.js';
 import {reveal} from './reveal.js';
 import {Snap} from './scope.js';
@@ -284,9 +284,15 @@ export default class KeyboardMonitorSnap extends Extension {
             if (tracked && !superseded)
                 operation.previousPlacement = {monitor: state.monitor, target: state.rect, frame: state.frame};
             intended = {layout, monitor, rect: target};
-            const zoomed = this._zoomedFrame(window, target, monitor);
+            // A window too large for the slot zooms into it, or failing that
+            // grows from it toward the middle of the monitor.
+            const area = window.get_work_area_for_monitor(monitor);
+            const minimum = sameFrame(target, area, 0) ? null : this._minimumFrame(window);
+            const zoomed = this._zoomedFrame(window, target, minimum);
             operation.slot = zoomed ? target : null;
-            const applied = await this._place(window, zoomed ?? target, monitor, operation);
+            operation.tiled = target;
+            const frame = zoomed ?? (minimum && grownFrame(target, area, minimum)) ?? target;
+            const applied = await this._place(window, frame, monitor, operation);
             this._states.set(window, {...intended, frame: applied.frame});
             if (!zoomed)
                 this._zoom(window, target, applied);
@@ -324,18 +330,21 @@ export default class KeyboardMonitorSnap extends Extension {
         return window.get_client_type() !== Meta.WindowClientType.X11;
     }
 
-    // The frame to ask of a window whose minimum size Mutter already knows
-    // will not fit `slot`, so the snap can move straight into the zoom. Null
-    // when it fits. Minimum sizes include the shadow.
-    _zoomedFrame(window, slot, monitor) {
+    // The smallest frame Mutter knows the window accepts, or null. Minimum
+    // sizes include the shadow.
+    _minimumFrame(window) {
         const [known, width, height] = window.get_min_size?.() ?? [false];
-        if (!known || !this._canZoom(window) ||
-            sameFrame(slot, window.get_work_area_for_monitor(monitor), 0))
+        if (!known)
             return null;
         const frame = window.get_frame_rect(), buffer = window.get_buffer_rect();
-        const zoom = zoomFor({width: width-buffer.width+frame.width,
-            height: height-buffer.height+frame.height}, slot);
-        return zoom && {x: slot.x, y: slot.y, width: zoom.width, height: zoom.height};
+        return {width: width-buffer.width+frame.width, height: height-buffer.height+frame.height};
+    }
+
+    // The frame to ask of a window whose known minimum will not fit `slot`,
+    // so the snap can move straight into the zoom. Null when it fits.
+    _zoomedFrame(window, slot, minimum) {
+        const zoom = minimum && this._canZoom(window) && zoomFor(minimum, slot);
+        return zoom ? {x: slot.x, y: slot.y, width: zoom.width, height: zoom.height} : null;
     }
 
     // Scale a Wayland app that turned out larger than its slot to fit it.
@@ -407,7 +416,7 @@ export default class KeyboardMonitorSnap extends Extension {
         // intentionally avoided: Chromium can acknowledge them out of order.
         window.untiledRect = original;
         window.isTiled = !applied.full;
-        window.tiledRect = applied.full ? null : new Rect(operation.slot ?? target);
+        window.tiledRect = applied.full ? null : new Rect(operation.tiled ?? target);
         Twm.updateTileGroup([window]);
         Twm.saveTileState(window);
         return applied;

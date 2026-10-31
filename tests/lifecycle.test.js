@@ -1371,8 +1371,24 @@ const zoomed = async (opts = {}) => {
     x.get_client_type = () => 1;
     await finishes(press('left'), 'X11 minimum');
     await settle(300);
-    assert(x.actor.scale_x === 1 && x.requests[0].width === 500, 'X11: requested as before');
+    assert(x.actor.scale_x === 1 && x.requests[0].width === 600 && x.frame.x === 0, 'X11 on the left: grows right');
     clean(x, 'X11 known minimum');
+    // On the right it grows left, staying on the monitor, and the sequence
+    // and Tiling Assistant still see the half.
+    const g = fresh({frame:{x:100, y:100, width:700, height:500}, lag:15});
+    g.minWidth = 600;
+    g.get_min_size = () => [true, 600, 400];
+    g.get_client_type = () => 1;
+    await finishes(press('right'), 'X11 right');
+    await settle(300);
+    assert(g.frame.x === 400 && g.frame.width === 600, `X11 on the right: grows left, no spill (${g.frame.x}, ${g.frame.width})`);
+    assert(g.actor.scale_x === 1, 'not scaled');
+    assert(g.tiledRect.x === 500 && g.tiledRect.width === 500, 'Tiling Assistant sees the half');
+    assert(e._states.get(g)?.rect.x === 500 && e._states.get(g)?.layout.x === 'right', 'the sequence sees the half');
+    await finishes(press('left'), 'X11 back');
+    await settle(300);
+    assert(e._states.get(g)?.layout.x === null, 'the opposite arrow works as from any half');
+    clean(g, 'X11 grown');
     // Shadows are part of a minimum; maximized windows never zoom.
     const s = fresh({frame:{x:100, y:100, width:700, height:500}, lag:15});
     s.minWidth = 600;

@@ -143,3 +143,20 @@ export function zoomFor(frame, slot) {
         return null;
     return {scale, width: Math.round(slot.width/scale), height: Math.round(slot.height/scale)};
 }
+
+// Where a window that cannot shrink to `slot` goes: it grows from the slot
+// toward the middle of the monitor's work area, so it stays on that monitor
+// as far as it fits. `minimum`: {width, height}. Null when it fits.
+export function grownFrame(slot, area, minimum) {
+    const axis = (start, size) => {
+        const length = Math.max(slot[size], minimum[size]);
+        const pastMiddle = slot[start]+slot[size]/2 > area[start]+area[size]/2;
+        const from = pastMiddle ? slot[start]+slot[size]-length : slot[start];
+        return [Math.max(area[start], Math.min(from, area[start]+area[size]-length)), length];
+    };
+    if (minimum.width-slot.width <= 3 && minimum.height-slot.height <= 3)
+        return null;
+    const [x, width] = axis('x', 'width');
+    const [y, height] = axis('y', 'height');
+    return {x, y, width, height};
+}
