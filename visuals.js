@@ -153,8 +153,13 @@ export class Visuals extends Map {
             const scale = slot.width/frame.width;
             this.showAt(window, actor, {...slot, height: frame.height*scale}, {x: 0, y: 0});
             visual.rect = {...slot};
+            this._trace(window, 'zoom-show', {drawn: frame, actor: {x: actor.x, y: actor.y, width: actor.width, height: actor.height},
+                buffer: rect(window.get_buffer_rect()), scale: [actor.scale_x, actor.scale_y],
+                translation: [actor.translation_x, actor.translation_y]});
         };
         scope.connect(window, 'size-changed', show, 'position-changed', show);
+        // Mutter's frame changes before the app's new image is shown.
+        scope.connect(actor, 'notify::width', show, 'notify::height', show);
         scope.connect(window, 'unmanaging', () => this.reset(window, false, actor));
         scope.connect(actor, 'destroy', () => this.reset(window, false, actor));
         window.move_resize_frame(true, slot.x, slot.y, zoom.width, zoom.height);

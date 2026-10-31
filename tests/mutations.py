@@ -121,6 +121,8 @@ MUTATIONS = [
      "{...slot, height: frame.height*scale}", "slot"),
     ('zoom asks for the height that fills the slot', 'visuals.js',
      "        window.move_resize_frame(true, slot.x, slot.y, zoom.width, zoom.height);\n", ""),
+    ('zoom follows the app\'s drawn size', 'visuals.js',
+     "        scope.connect(actor, 'notify::width', show, 'notify::height', show);\n", ""),
     ('zoom ends on close', 'visuals.js',
      "        scope.connect(window, 'unmanaging', () => this.reset(window, false, actor));\n", ""),
     ('zoom ends on an outside maximize', 'visuals.js',

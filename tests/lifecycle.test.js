@@ -1246,8 +1246,11 @@ const zoomed = async (opts = {}) => {
     w.drawn = {...w.drawn, height:800};
     w.emit('size-changed');
     assert(Math.abs(w.actor.scale_y-w.actor.scale_x) < 0.0001, 'still even while the app catches up');
+    // The image arriving is enough: no new frame from Mutter.
+    w.actor.translation_x = 99;
     w.drawn = {...w.frame};
-    w.emit('size-changed');
+    w.actor.emit('notify::height');
+    assert(w.actor.translation_x === 0, 'placed again when the new image arrives');
     // Still tracked: the next press is a snap from the half, not a fresh start.
     await finishes(press('right'), 'zoom to opposite side');
     await settle(400);
