@@ -140,6 +140,8 @@ MUTATIONS = [
     ('zoomed windows stay tracked', 'extension.js',
      "(this._visuals.get(window)?.zoomed || sameFrame(window.get_frame_rect(), state.frame))",
      "sameFrame(window.get_frame_rect(), state.frame)"),
+    ('X11 windows are never zoomed', 'extension.js',
+     "        return window.get_client_type() !== Meta.WindowClientType.X11;", "        return true;"),
     ('a known minimum goes straight into the zoom', 'extension.js',
      "            operation.slot = zoomed ? target : null;\n            const applied = await this._place(window, zoomed ?? target, monitor, operation);",
      "            operation.slot = null;\n            const applied = await this._place(window, target, monitor, operation);"),

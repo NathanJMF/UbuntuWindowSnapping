@@ -1269,8 +1269,8 @@ const zoomed = async (opts = {}) => {
 }
 {
     const w = await zoomed({x11:true});
-    assert(w.actor.scale_x < 1, 'X11 apps zoom too');
-    mock.grab(null, w);
+    assert(w.actor.scale_x === 1 && w.frame.height === 800, 'X11 apps are not scaled: they spill');
+    clean(w, 'X11 not zoomed');
     const v = await zoomed({minWidth:1100});
     assert(v.actor.scale_x === 1, 'an app that would be too small keeps its size');
     clean(v, 'too small not zoomed');
@@ -1371,8 +1371,8 @@ const zoomed = async (opts = {}) => {
     x.get_client_type = () => 1;
     await finishes(press('left'), 'X11 minimum');
     await settle(300);
-    assert(x.requests[0].width === 600, 'X11: straight into the zoom too');
-    mock.grab(null, x);
+    assert(x.actor.scale_x === 1 && x.requests[0].width === 500, 'X11: requested as before');
+    clean(x, 'X11 known minimum');
     // Shadows are part of a minimum; maximized windows never zoom.
     const s = fresh({frame:{x:100, y:100, width:700, height:500}, lag:15});
     s.minWidth = 600;

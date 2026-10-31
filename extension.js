@@ -317,12 +317,19 @@ export default class KeyboardMonitorSnap extends Extension {
             await this._run(window, next);
     }
 
+    // Mutter ignores an X11 window's transform when it reports the pointer to
+    // the app, so clicks would land in the wrong place on a scaled window.
+    // X11 apps keep their real size, spilling past a slot too small for them.
+    _canZoom(window) {
+        return window.get_client_type() !== Meta.WindowClientType.X11;
+    }
+
     // The frame to ask of a window whose minimum size Mutter already knows
     // will not fit `slot`, so the snap can move straight into the zoom. Null
     // when it fits. Minimum sizes include the shadow.
     _zoomedFrame(window, slot, monitor) {
         const [known, width, height] = window.get_min_size?.() ?? [false];
-        if (!known ||
+        if (!known || !this._canZoom(window) ||
             sameFrame(slot, window.get_work_area_for_monitor(monitor), 0))
             return null;
         const frame = window.get_frame_rect(), buffer = window.get_buffer_rect();
@@ -334,7 +341,7 @@ export default class KeyboardMonitorSnap extends Extension {
     // Scale a Wayland app that turned out larger than its slot to fit it.
     _zoom(window, slot, {full}) {
         const actor = window.get_compositor_private();
-        if (!full && actor)
+        if (!full && actor && this._canZoom(window))
             this._visuals.zoom(window, actor, slot);
     }
 
