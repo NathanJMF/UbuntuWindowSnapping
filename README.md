@@ -9,7 +9,7 @@ A GNOME Shell 50 extension for Ubuntu (Wayland) that replaces Super+Arrow with h
 - `placement.js`: one placement: unmaximize, animate, set the final geometry, confirm it, maximize.
 - `reveal.js`: the animation.
 - `handover.js`, `layers.js`, `geometry.js`, `follow-up.js`: pure logic for the animation: when the live window takes over, where each layer goes, rectangles, easing and the eased path, and follow-up learning.
-- `visuals.js`: what each window actor shows (transform, clip) and the post-motion hold.
+- `visuals.js`: what each window actor shows (transform, clip), the post-motion hold, and zoom to fit.
 - `effects.js`: snapshots, the backdrop, skipping GNOME's own size-change effects, and the maximize cover.
 - `follow-up-tracker.js`: per-window follow-up learning and observation.
 - `bindings.js`: taking and restoring the Super+Arrow shortcuts.
@@ -38,6 +38,7 @@ Each snap asks the app once for its final size and animates the window's outline
 - **Each direction eases separately.** A growing direction starts gently; a shrinking one settles quickly.
 - **Handover.** The live window takes over once the app has drawn the final size and then nothing new for 24 ms. Apps that draw a corrected layout shortly after resizing (Claude desktop, about 45 ms later) have that delay learned per window, and the handover waits for it. If neither happens in time, the handover starts at 60% of the motion (75% for apps with a learned follow-up). The fade always ends by 90% of the motion.
 - **Minimum sizes.** If the app draws a larger size than requested and Mutter confirms it, the animation smoothly re-aims there.
+- **Zoom to fit.** An app's minimum can't be overridden: removing it from Mutter still leaves Chromium drawing at its own limit. So a Wayland app that would overflow its slot is scaled evenly into it, and asked for the frame that fills the slot at that scale (600×2089 at 90% for a 540×1880 slot). Mutter reports the minimum, so this happens in one motion from the first snap; a window with no known minimum zooms after landing. It ends at the next snap, grab, close, or outside maximize. Not used below 75%, or on X11, where clicks would miss.
 - **Native state changes.** GNOME's own maximize and unmaximize effects are skipped. The snapshot covers leaving the maximized state, and a snapshot of the landed window covers entering it, until the app's maximized frame settles.
 - **Crossings.** Moves between monitors repaint every monitor on each frame.
 - **Interruptions.** Pressing again mid-snap continues from what is on screen. Presses made meanwhile are folded into one placement.

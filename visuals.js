@@ -135,9 +135,10 @@ export class Visuals extends Map {
     // Keep a window that will not fit `slot` evenly scaled into it, asking
     // for the frame that fills the slot at that scale. Ends like a hold: a
     // new motion stops it, anything else resets the window. Returns whether
-    // the window is zoomed.
-    zoom(window, actor, slot) {
-        const zoom = zoomFor(rect(window.get_frame_rect()), slot);
+    // the window is zoomed. `asked`: the frame already requested, if any; the
+    // window may not have reached it yet, so its size says nothing.
+    zoom(window, actor, slot, asked = null) {
+        const zoom = asked ?? zoomFor(rect(window.get_frame_rect()), slot);
         if (!zoom)
             return false;
         const visual = this.get(window) ?? {};
@@ -164,9 +165,10 @@ export class Visuals extends Map {
         scope.connect(actor, 'notify::width', show, 'notify::height', show);
         scope.connect(window, 'unmanaging', () => this.reset(window, false, actor));
         scope.connect(actor, 'destroy', () => this.reset(window, false, actor));
-        window.move_resize_frame(true, slot.x, slot.y, zoom.width, zoom.height);
+        if (!asked)
+            window.move_resize_frame(true, slot.x, slot.y, zoom.width, zoom.height);
         show();
-        this._trace(window, 'zoom', {slot, scale: zoom.scale, asked: {width: zoom.width, height: zoom.height}});
+        this._trace(window, 'zoom', {slot, asked: {width: zoom.width, height: zoom.height}});
         return true;
     }
 

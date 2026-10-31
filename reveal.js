@@ -110,7 +110,7 @@ export function reveal({window, from, to, slot, apply, snap, effects, visuals, f
                 effects.dropBackdrop();
                 effects.dropCover(growing ? handover.remaining(elapsed) : 0);
                 if (slot)
-                    visuals.zoom(window, actor, slot);
+                    visuals.zoom(window, actor, slot, to);
                 else
                     visuals.hold(window, actor, path.end, anchor);
             } else if (!snap.superseded) {

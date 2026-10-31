@@ -1294,6 +1294,17 @@ const zoomed = async (opts = {}) => {
     assert(Math.round(w.drawn.height*w.actor.scale_y) === 800, 'fills the slot');
     mock.grab(null, w);
     clean(w, 'direct zoom ended by a grab');
+    // An app still catching up when the motion ends is not asked again from
+    // its half-way size.
+    const slow = fresh({frame:{x:100, y:100, width:700, height:500}, lag:300});
+    slow.minWidth = 600;
+    slow.get_min_size = () => [true, 600, 400];
+    await finishes(press('left'), 'slow zoom', 3000);
+    await settle(500);
+    assert(slow.requests.every(q => q.width === 600 && q.height === 960),
+        `a lagging app keeps the size asked of it (${JSON.stringify(slow.requests.at(-1))})`);
+    assert(e._visuals.get(slow)?.zoomed, 'and stays zoomed');
+    mock.grab(null, slow);
     // In the motion too: the live window is scaled, never cropped.
     const m = fresh({frame:{x:100, y:100, width:700, height:500}, lag:15});
     m.minWidth = 600;
