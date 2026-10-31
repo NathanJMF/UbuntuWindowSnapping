@@ -591,7 +591,11 @@ const maxJump = moves => {
     const w = fresh({frame:{...AREAS[0]}, lag:20});
     w.minWidth = 700;
     fullState(w);
+    // The re-aim itself, for an app too big to zoom.
+    const realZoom = e._visuals.zoom;
+    e._visuals.zoom = () => false;
     const r = await watchMorph(w, 'left', {stepMs:2, steps:120});
+    e._visuals.zoom = realZoom;
     assert(r.reaims.length === 1 && r.reaims[0].why === 'drawn' && r.reaims[0].to.width === 700,
         `re-aimed at the drawn 700 px (${JSON.stringify(r.reaims)})`);
     assert(r.moves.at(-1).width === 700, 'outline ends at the granted 700 px');
@@ -1161,6 +1165,8 @@ const running = since => mock.timelines.slice(since).filter(t => t.running && !t
 {
     const w = fresh({frame:{...AREAS[0]}, lag:20});
     fullState(w);
+    const realZoom = e._visuals.zoom;
+    e._visuals.zoom = () => false;
     const p = press('left');
     let corrected = false;
     for (let i = 0; i < 100; i++) {
@@ -1173,6 +1179,7 @@ const running = since => mock.timelines.slice(since).filter(t => t.running && !t
     }
     await settle(600);
     await p;
+    e._visuals.zoom = realZoom;
     // Without the restart, the 700 px draw 20 ms after the 500 px one would
     // be learned as a 20 ms follow-up.
     const samples = e._followUps.samples.get(w) ?? [];
@@ -1262,9 +1269,9 @@ const zoomed = async (opts = {}) => {
 }
 {
     const w = await zoomed({x11:true});
-    assert(w.actor.scale_x === 1 && w.frame.height === 800, 'X11 apps are not scaled');
-    clean(w, 'X11 not zoomed');
-    const v = await zoomed({minWidth:800});
+    assert(w.actor.scale_x < 1, 'X11 apps zoom too');
+    mock.grab(null, w);
+    const v = await zoomed({minWidth:1100});
     assert(v.actor.scale_x === 1, 'an app that would be too small keeps its size');
     clean(v, 'too small not zoomed');
     const c = await zoomed();
@@ -1333,8 +1340,8 @@ const zoomed = async (opts = {}) => {
     x.get_client_type = () => 1;
     await finishes(press('left'), 'X11 minimum');
     await settle(300);
-    assert(x.actor.scale_x === 1 && x.requests[0].width === 500, 'X11: requested as before');
-    clean(x, 'X11 known minimum');
+    assert(x.requests[0].width === 600, 'X11: straight into the zoom too');
+    mock.grab(null, x);
     // Shadows are part of a minimum; maximized windows never zoom.
     const s = fresh({frame:{x:100, y:100, width:700, height:500}, lag:15});
     s.minWidth = 600;

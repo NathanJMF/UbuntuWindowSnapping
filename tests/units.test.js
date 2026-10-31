@@ -197,7 +197,7 @@ function startOf(handover, {sizedAt = null, drawsAt = []} = {}) {
     assert(z.scale === 0.9 && z.width === 600 && z.height === 2089, 'evenly scaled, tall enough to fill the slot');
     const tall = zoomFor({width:540, height:2000}, slot);
     assert(Math.abs(tall.scale-0.94) < 0.001 && tall.height === 2000, 'a minimum height zooms the same way');
-    assert(zoomFor({width:1010, height:1880}, slot) === null, 'too small to use: left alone');
+    assert(zoomFor({width:1200, height:1880}, slot) === null, 'too small to use: left alone');
     assert(zoomFor({width:540/MIN_ZOOM, height:1880}, slot) !== null, 'the limit itself still zooms');
 }
 

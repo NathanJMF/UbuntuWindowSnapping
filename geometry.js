@@ -129,7 +129,7 @@ export class EasedPath {
 }
 
 // Below this an app is too small to use; it keeps its real size instead.
-export const MIN_ZOOM = 0.75;
+export const MIN_ZOOM = 0.5;
 
 // An app that stays larger than its slot (its own minimum size) is shown
 // evenly scaled to fit. Returns the scale and the frame to ask for, so that
