@@ -38,12 +38,19 @@ export function createEffects(window, {animating, visuals, followUps, debug}) {
     // relax still easing, or `fallback`.
     const seenAt = fallback => visuals.get(window)?.rect ?? visuals.displayedRect(window) ?? fallback;
     const snapshot = at => {
+        // The actor's own transform would be painted into the image, leaving
+        // a zoomed window small in one corner of it. Nothing is drawn between
+        // these lines, so the change never shows.
+        const {scale_x, scale_y, translation_x, translation_y} = actor;
+        Object.assign(actor, {scale_x: 1, scale_y: 1, translation_x: 0, translation_y: 0});
         let content;
         try {
             content = actor.paint_to_content(window.get_frame_rect());
         } catch (error) {
             // No texture yet (e.g. just mapped).
             return null;
+        } finally {
+            Object.assign(actor, {scale_x, scale_y, translation_x, translation_y});
         }
         const widget = new St.Widget({content});
         widget.set_position(at.x, at.y);

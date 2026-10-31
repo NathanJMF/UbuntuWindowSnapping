@@ -1312,6 +1312,37 @@ const zoomed = async (opts = {}) => {
         `a lagging app keeps the size asked of it (${JSON.stringify(slow.requests.at(-1))})`);
     assert(e._visuals.get(slow)?.zoomed, 'and stays zoomed');
     mock.grab(null, slow);
+    // A snapshot of a zoomed window is of the whole window, not a small copy
+    // in one corner, and the zoom is still in place when it has been taken.
+    {
+        const z = fresh({frame:{x:100, y:100, width:700, height:500}, lag:15});
+        z.minWidth = 600;
+        z.get_min_size = () => [true, 600, 400];
+        await finishes(press('left'), 'zoom before snapshot');
+        await settle(300);
+        z.emit('size-changed');
+        const scale = z.actor.scale_x;
+        assert(scale < 1, 'zoomed before the snapshot');
+        const painted = [];
+        z.actor.paint_to_content = () => {painted.push(z.actor.scale_x); return {};};
+        mock.widgets = [];
+        const p2 = press('up');
+        assert(painted.length && painted[0] === 1, `snapshot painted unscaled (${painted})`);
+        await finishes(p2, 'snap from zoom');
+        await settle(400);
+        mock.grab(null, z);
+    }
+    // And the transform comes straight back after it, for a window that stays
+    // zoomed if the placement is interrupted before it moves.
+    {
+        const z = fresh({frame:{x:100, y:100, width:700, height:500}, lag:15});
+        z.actor.scale_x = 0.5;
+        mock.widgets = [];
+        const p3 = press('left');
+        assert(z.actor.scale_x === 0.5, `transform restored after the snapshot (${z.actor.scale_x})`);
+        await finishes(p3, 'restored transform');
+        await settle(300);
+    }
     // In the motion too: the live window is scaled, never cropped.
     const m = fresh({frame:{x:100, y:100, width:700, height:500}, lag:15});
     m.minWidth = 600;
